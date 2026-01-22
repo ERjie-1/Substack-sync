@@ -24,7 +24,7 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'schedule' && 'test' || github.event.inputs.environment }}
+    environment: ${{ github.event_name == 'schedule' && 'prod' || github.event.inputs.environment }}
 
     steps:
       - name: Checkout repository
