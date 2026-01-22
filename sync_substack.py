@@ -1025,6 +1025,10 @@ def sync_gmail_to_notion():
     # 初始化 Notion API
     notion = NotionAPI(NOTION_API_TOKEN)
     notion2 = NotionAPI(NOTION_API_TOKEN_2) if NOTION_API_TOKEN_2 and NOTION_DATABASE_ID_2 else None
+    if notion2:
+        print("DB2: Enabled")
+    else:
+        print("DB2: Disabled (missing NOTION_API_TOKEN_2 or NOTION_DATABASE_ID_2)")
 
     # 获取已存在的文章 (用于去重)
     existing_items = set()
@@ -1160,9 +1164,12 @@ def sync_gmail_to_notion():
                             children=content_blocks
                         )
                         if result2.get("id"):
-                            print(f"  [DB2] Synced")
+                            print(f"[DB2] Synced: {subject[:50]}...")
+                        else:
+                            error_msg2 = result2.get('message', str(result2))
+                            print(f"[DB2] Failed: {subject[:50]}... - {error_msg2}")
                     except Exception as e2:
-                        print(f"  [DB2] Failed: {e2}")
+                        print(f"[DB2] Failed: {subject[:50]}... - {e2}")
             else:
                 error_msg = result.get('message', str(result))
                 print(f"[DB1] Failed: {subject[:50]}... - {error_msg}")
