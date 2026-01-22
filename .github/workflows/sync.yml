@@ -1,7 +1,7 @@
 name: Sync Substack to Notion
 
 on:
-  # 定时运行：每2小时执行一次
+  # 定时运行：每2小时执行1次
   schedule:
     - cron: '0 */2 * * *'
 
