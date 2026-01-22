@@ -1,0 +1,55 @@
+name: Sync Substack to Notion
+
+on:
+  # 定时运行：每2小时执行一次
+  schedule:
+    - cron: '0 */2 * * *'
+
+  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+          - test
+          - prod
+      max_emails:
+        description: 'Maximum emails to fetch'
+        required: false
+        default: '50'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'schedule' && 'test' || github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run sync script
+        env:
+          NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_API_TOKEN_2: ${{ secrets.NOTION_API_TOKEN_2 }}
+          NOTION_DATABASE_ID_2: ${{ secrets.NOTION_DATABASE_ID_2 }}
+          GMAIL_TOKEN_BASE64: ${{ secrets.GMAIL_TOKEN_BASE64 }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ENABLE_TRANSLATION: 'true'
+          MAX_EMAIL_LIMIT: ${{ github.event.inputs.max_emails || '50' }}
+        run: |
+          export GMAIL_TOKEN="$(echo "$GMAIL_TOKEN_BASE64" | base64 --decode)"
+          python sync_substack.py

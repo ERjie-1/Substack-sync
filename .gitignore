@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+
+# Credentials (NEVER commit these!)
+*.pickle
+gmail_token.pickle
+gmail_credentials.json
+credentials.json
+token.json
+*.json.bak
+
+# Config with secrets
+config/gmail_*.json
+config/gmail_*.pickle
+
+# Logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Local test files
+test_*.py
+*_test.py
+
+# Environment files
+.env
+.env.local
+
+# Gmail token for GitHub (contains secrets!)
+gmail_token_for_github.json
