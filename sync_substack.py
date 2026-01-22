@@ -62,18 +62,18 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 # ============ 发件人配置 ============
 # 你的 Substack 订阅源
 GMAIL_QUERY = '''from:(
+    lobwedge@substack.com OR
     robonomics@substack.com OR
     purpledrink@substack.com OR
     nathanbancroft@substack.com OR
     jamesbulltard@substack.com OR
     globalsemiresearch@substack.com OR
+    wukong123@substack.com OR
+    robs@substack.com OR
     oreo521@substack.com OR
     franktrading@substack.com OR
-    macrocharts@substack.com OR
     tmtbreakout@substack.com OR
     semianalysis@substack.com OR
-    fundaai@substack.com OR
-    noreply@funda.ai OR
     capitalflows@substack.com OR
     sleepysol@substack.com OR
     globaltechresearch@substack.com OR
@@ -82,18 +82,18 @@ GMAIL_QUERY = '''from:(
 
 # 发件人显示名称映射
 SOURCE_MAPPING = {
+    'lobwedge@substack.com': 'LW Research',
     'robonomics@substack.com': 'Robonomics',
     'purpledrink@substack.com': 'Purple Drinks',
     'nathanbancroft@substack.com': 'Nathan',
-    'jamesbulltard@substack.com': 'James',
-    'globalsemiresearch@substack.com': 'GlobalSemiResearch',
+    'jamesbulltard@substack.com': 'Bulltrad',
+    'globalsemiresearch@substack.com': 'GlobalSemiresearch',
+    'wukong123@substack.com': 'Wukong',
+    'robs@substack.com': 'Robs',
     'oreo521@substack.com': 'Oreo',
     'franktrading@substack.com': 'Frank',
-    'macrocharts@substack.com': 'MacroCharts',
     'tmtbreakout@substack.com': 'TMTB',
     'semianalysis@substack.com': 'SemiAnalysis',
-    'fundaai@substack.com': 'FundaAI',
-    'noreply@funda.ai': 'FundaAI',
     'capitalflows@substack.com': 'CapitalFlows',
     'sleepysol@substack.com': 'SleepySol',
     'globaltechresearch@substack.com': 'GlobalTechResearch',
