@@ -1113,7 +1113,7 @@ def sync_gmail_to_notion():
             # 提取 Ticker
             tickers = extract_tickers(subject, body_html if body_html else "", sender_tag)
 
-            # 构建属性 (不包含 "状态" 属性，兼容两个数据库)
+            # 构建基础属性
             properties = {
                 "Name": {"title": [{"type": "text", "text": {"content": subject[:200]}}]},
                 "Date": {"date": {"start": date_str}},
@@ -1131,13 +1131,18 @@ def sync_gmail_to_notion():
                     "multi_select": [{"name": t} for t in tickers[:10]]
                 }
 
+            # 数据库1：增加“状态=待处理”，数据库2不加
+            properties_db1 = dict(properties)
+            properties_db1["状态"] = {"select": {"name": "待处理"}}
+            properties_db2 = properties
+
             # 清理无效链接
             content_blocks = sanitize_blocks_for_notion(content_blocks)
 
             # 创建 Notion 页面 (数据库1)
             result = notion.create_page_with_all_blocks(
                 database_id=NOTION_DATABASE_ID,
-                properties=properties,
+                properties=properties_db1,
                 children=content_blocks
             )
 
@@ -1151,7 +1156,7 @@ def sync_gmail_to_notion():
                     try:
                         result2 = notion2.create_page_with_all_blocks(
                             database_id=NOTION_DATABASE_ID_2,
-                            properties=properties,
+                            properties=properties_db2,
                             children=content_blocks
                         )
                         if result2.get("id"):
