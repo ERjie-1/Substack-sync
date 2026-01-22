@@ -1082,6 +1082,7 @@ def sync_gmail_to_notion():
 
             # 跳过欢迎邮件
             if subject.lower().startswith('welcome to '):
+                print(f"[SKIP] Welcome email: {subject[:50]}...")
                 continue
 
             # 解析日期
@@ -1098,6 +1099,7 @@ def sync_gmail_to_notion():
             # 检查是否已存在
             unique_id = generate_unique_id(subject, sender_tag, date_str)
             if unique_id in existing_items:
+                print(f"[SKIP] Duplicate: {subject[:50]}...")
                 continue
 
             # 提取文章 URL
