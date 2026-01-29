@@ -87,7 +87,7 @@ SOURCE_MAPPING = {
     'purpledrink@substack.com': 'Purple Drinks',
     'nathanbancroft@substack.com': 'Nathan',
     'jamesbulltard@substack.com': 'Bulltrad',
-    'globalsemiresearch@substack.com': 'GlobalSemiresearch',
+    'globalsemiresearch@substack.com': 'GlobalSemiResearch',
     'wukong123@substack.com': 'Wukong',
     'robs@substack.com': 'Robs',
     'oreo521@substack.com': 'Oreo',
@@ -201,6 +201,13 @@ def clean_url(url: str) -> str:
         return ""
     return url.split('?')[0]
 
+def normalize_url(url: str) -> str:
+    """用于去重的 URL 规范化"""
+    url = clean_url(url).strip()
+    if url.endswith('/'):
+        url = url[:-1]
+    return url
+
 
 def validate_and_fix_url(url: str) -> Optional[str]:
     """验证并修复 URL"""
@@ -294,10 +301,20 @@ def extract_sender_tag(email_addr: str) -> str:
     return "unknown"
 
 
+def normalize_sender(sender: str) -> str:
+    """标准化发件人名称，避免大小写/空格导致重复"""
+    if not sender:
+        return ""
+    sender = sender.strip().lower()
+    sender = re.sub(r'[^a-z0-9]+', '', sender)
+    return sender
+
+
 def generate_unique_id(subject: str, sender: str, date_str: str) -> str:
     """生成唯一 ID 用于去重"""
     date_only = date_str[:10] if date_str else ""
-    content = f"{subject}|{sender}|{date_only}"
+    sender_norm = normalize_sender(sender)
+    content = f"{subject}|{sender_norm}|{date_only}"
     return hashlib.md5(content.encode()).hexdigest()[:16]
 
 
@@ -1032,6 +1049,7 @@ def sync_gmail_to_notion():
 
     # 获取已存在的文章 (用于去重)
     existing_items = set()
+    existing_urls = set()
     try:
         has_more = True
         start_cursor = None
@@ -1044,6 +1062,7 @@ def sync_gmail_to_notion():
                 title_prop = props.get("Name", {}).get("title", [])
                 sender_prop = props.get("发件人", {}).get("select", {})
                 date_prop = props.get("Date", {}).get("date", {})
+                url_prop = props.get("URL", {}).get("url", "")
 
                 title = title_prop[0].get("text", {}).get("content", "") if title_prop else ""
                 sender_name = sender_prop.get("name", "") if sender_prop else ""
@@ -1051,6 +1070,10 @@ def sync_gmail_to_notion():
 
                 if title and sender_name and date_str:
                     existing_items.add(generate_unique_id(title, sender_name, date_str))
+                if url_prop:
+                    norm_url = normalize_url(url_prop)
+                    if norm_url:
+                        existing_urls.add(norm_url)
 
             has_more = result.get("has_more", False)
             start_cursor = result.get("next_cursor")
@@ -1059,6 +1082,7 @@ def sync_gmail_to_notion():
         print(f"Error fetching existing items: {e}")
 
     print(f"Existing articles in Notion: {len(existing_items)}")
+    print(f"Existing URLs in Notion: {len(existing_urls)}")
 
     # 获取邮件
     try:
@@ -1096,14 +1120,21 @@ def sync_gmail_to_notion():
             except:
                 date_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
 
-            # 检查是否已存在
+            # 提取文章 URL
+            article_url = extract_article_url(body_text) or extract_article_url(body_html)
+            article_url_norm = normalize_url(article_url) if article_url else ""
+
+            # 仅对 GlobalSemiResearch 使用 URL 去重
+            if normalize_sender(sender_tag) == "globalsemiresearch" and article_url_norm:
+                if article_url_norm in existing_urls:
+                    print(f"[SKIP] Duplicate (URL): {subject[:50]}...")
+                    continue
+
+            # 检查是否已存在 (默认逻辑)
             unique_id = generate_unique_id(subject, sender_tag, date_str)
             if unique_id in existing_items:
                 print(f"[SKIP] Duplicate: {subject[:50]}...")
                 continue
-
-            # 提取文章 URL
-            article_url = extract_article_url(body_text) or extract_article_url(body_html)
 
             # 判断类型
             is_chat = 'new thread from' in subject.lower() or '/chat/' in (article_url or '')
@@ -1156,6 +1187,8 @@ def sync_gmail_to_notion():
                 print(f"[DB1] Synced: {subject[:50]}...")
                 synced_count += 1
                 existing_items.add(unique_id)
+                if article_url_norm:
+                    existing_urls.add(article_url_norm)
 
                 # 同步到数据库2
                 if notion2:
