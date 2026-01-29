@@ -940,9 +940,9 @@ class NotionAPI:
             "Notion-Version": "2022-06-28"
         }
 
-    def query_database(self, database_id: str, start_cursor: str = None) -> Dict:
+    def query_database(self, database_id: str, start_cursor: str = None, payload: Dict = None) -> Dict:
         url = f"{self.BASE_URL}/databases/{database_id}/query"
-        body = {}
+        body = dict(payload) if payload else {}
         if start_cursor:
             body["start_cursor"] = start_cursor
         response = requests.post(url, headers=self.headers, json=body)
@@ -962,6 +962,12 @@ class NotionAPI:
     def append_blocks(self, page_id: str, children: List[Dict]) -> Dict:
         url = f"{self.BASE_URL}/blocks/{page_id}/children"
         body = {"children": children[:100]}
+        response = requests.patch(url, headers=self.headers, json=body)
+        return response.json()
+
+    def update_page(self, page_id: str, properties: Dict) -> Dict:
+        url = f"{self.BASE_URL}/pages/{page_id}"
+        body = {"properties": properties}
         response = requests.patch(url, headers=self.headers, json=body)
         return response.json()
 
@@ -1028,6 +1034,47 @@ def sanitize_blocks_for_notion(blocks: List[Dict]) -> List[Dict]:
     return sanitized
 
 
+def update_recent_empty_statuses(notion: NotionAPI, database_id: str, limit: int = 20) -> None:
+    """将最近的空状态条目设置为“待处理”"""
+    print(f"Checking recent {limit} Notion items for empty status...")
+    try:
+        payload = {
+            "page_size": limit,
+            "sorts": [{"property": "Date", "direction": "descending"}],
+        }
+        result = notion.query_database(database_id, payload=payload)
+    except Exception as e:
+        print(f"Error querying recent items: {e}")
+        return
+
+    pages = result.get("results", [])
+    updated = 0
+    skipped = 0
+    missing_status = 0
+
+    for page in pages:
+        page_id = page.get("id")
+        props = page.get("properties", {})
+        status_prop = props.get("状态")
+        if not status_prop or "select" not in status_prop:
+            missing_status += 1
+            continue
+
+        select_value = status_prop.get("select")
+        if select_value is None:
+            if not page_id:
+                continue
+            try:
+                notion.update_page(page_id, {"状态": {"select": {"name": "待处理"}}})
+                updated += 1
+            except Exception as e:
+                print(f"Error updating page {page_id}: {e}")
+        else:
+            skipped += 1
+
+    print(f"Status update done. Updated: {updated}, Skipped: {skipped}, Missing status: {missing_status}")
+
+
 # ============ 主同步函数 ============
 def sync_gmail_to_notion():
     """主同步函数"""
@@ -1046,6 +1093,9 @@ def sync_gmail_to_notion():
         print("DB2: Enabled")
     else:
         print("DB2: Disabled (missing NOTION_API_TOKEN_2 or NOTION_DATABASE_ID_2)")
+
+    # 更新最近 20 条空状态记录为“待处理”
+    update_recent_empty_statuses(notion, NOTION_DATABASE_ID, limit=20)
 
     # 获取已存在的文章 (用于去重)
     existing_items = set()
