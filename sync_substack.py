@@ -1240,8 +1240,8 @@ def sync_gmail_to_notion():
                 if article_url_norm:
                     existing_urls.add(article_url_norm)
 
-                # 同步到数据库2
-                if notion2:
+                # 同步到数据库2 (Robs 仅同步到 DB1)
+                if notion2 and sender_tag != "Robs":
                     try:
                         result2 = notion2.create_page_with_all_blocks(
                             database_id=NOTION_DATABASE_ID_2,
