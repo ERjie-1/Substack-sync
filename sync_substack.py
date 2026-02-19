@@ -1141,7 +1141,7 @@ def sync_gmail_to_notion():
         print(f"Fetched {len(emails)} emails from Gmail")
     except Exception as e:
         print(f"Error fetching emails: {e}")
-        return
+        exit(1)
 
     # 同步邮件
     synced_count = 0
