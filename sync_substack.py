@@ -1130,6 +1130,7 @@ def sync_gmail_to_notion():
 
     except Exception as e:
         print(f"Error fetching existing items: {e}")
+        exit(1)
 
     print(f"Existing articles in Notion: {len(existing_items)}")
     print(f"Existing URLs in Notion: {len(existing_urls)}")
