@@ -946,6 +946,7 @@ class NotionAPI:
         if start_cursor:
             body["start_cursor"] = start_cursor
         response = requests.post(url, headers=self.headers, json=body)
+        response.raise_for_status()
         return response.json()
 
     def create_page(self, database_id: str, properties: Dict, children: List[Dict] = None) -> Dict:
@@ -1106,6 +1107,8 @@ def sync_gmail_to_notion():
 
         while has_more:
             result = notion.query_database(NOTION_DATABASE_ID, start_cursor=start_cursor)
+            if result.get("object") == "error":
+                raise Exception(f"Notion query error: {result.get('message', result)}")
 
             for page in result.get("results", []):
                 props = page.get("properties", {})
@@ -1182,7 +1185,7 @@ def sync_gmail_to_notion():
                     continue
 
             # 检查是否已存在 (默认逻辑)
-            unique_id = generate_unique_id(subject, sender_tag, date_str)
+            unique_id = generate_unique_id(subject[:200], sender_tag, date_str)
             if unique_id in existing_items:
                 print(f"[SKIP] Duplicate: {subject[:50]}...")
                 continue
