@@ -28,7 +28,7 @@ import html
 import quopri
 import hashlib
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 from email.utils import parsedate_to_datetime
 
@@ -1098,15 +1098,22 @@ def sync_gmail_to_notion():
     # 更新最近 20 条空状态记录为“待处理”
     update_recent_empty_statuses(notion, NOTION_DATABASE_ID, limit=20)
 
-    # 获取已存在的文章 (用于去重)
+    # 获取已存在的文章 (用于去重，只查最近 7 天)
     existing_items = set()
     existing_urls = set()
+    cutoff_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    dedup_filter = {
+        "filter": {
+            "property": "Date",
+            "date": {"on_or_after": cutoff_date}
+        }
+    }
     try:
         has_more = True
         start_cursor = None
 
         while has_more:
-            result = notion.query_database(NOTION_DATABASE_ID, start_cursor=start_cursor)
+            result = notion.query_database(NOTION_DATABASE_ID, start_cursor=start_cursor, payload=dedup_filter)
             if result.get("object") == "error":
                 raise Exception(f"Notion query error: {result.get('message', result)}")
 
