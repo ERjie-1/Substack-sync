@@ -1145,6 +1145,44 @@ def sync_gmail_to_notion():
     print(f"Existing articles in Notion: {len(existing_items)}")
     print(f"Existing URLs in Notion: {len(existing_urls)}")
 
+    # Safety check: 7 天内应有文章，空结果可能是 API 异常
+    if len(existing_items) == 0:
+        print("WARNING: 0 existing articles found, retrying dedup query...")
+        existing_items = set()
+        existing_urls = set()
+        try:
+            has_more = True
+            start_cursor = None
+            while has_more:
+                result = notion.query_database(NOTION_DATABASE_ID, start_cursor=start_cursor, payload=dedup_filter)
+                response_obj = result.get("object")
+                if response_obj == "error":
+                    raise Exception(f"Notion query error: {result.get('message', result)}")
+                for page in result.get("results", []):
+                    props = page.get("properties", {})
+                    title_prop = props.get("Name", {}).get("title", [])
+                    sender_prop = props.get("发件人", {}).get("select", {})
+                    date_prop = props.get("Date", {}).get("date", {})
+                    url_prop = props.get("URL", {}).get("url", "")
+                    title = title_prop[0].get("text", {}).get("content", "") if title_prop else ""
+                    sender_name = sender_prop.get("name", "") if sender_prop else ""
+                    date_str = date_prop.get("start", "") if date_prop else ""
+                    if title and sender_name and date_str:
+                        existing_items.add(generate_unique_id(title, sender_name, date_str))
+                    if url_prop:
+                        norm_url = normalize_url(url_prop)
+                        if norm_url:
+                            existing_urls.add(norm_url)
+                has_more = result.get("has_more", False)
+                start_cursor = result.get("next_cursor")
+        except Exception as e:
+            print(f"Retry also failed: {e}")
+            exit(1)
+        print(f"Retry result - Existing articles: {len(existing_items)}, URLs: {len(existing_urls)}")
+        if len(existing_items) == 0:
+            print("ERROR: Dedup query returned 0 articles twice. Aborting to prevent duplicates.")
+            exit(1)
+
     # 获取邮件
     try:
         gmail_service = get_gmail_service()
