@@ -1206,6 +1206,7 @@ def sync_gmail_to_notion():
             body_html = email['body_html']
             body_text = email['body_text']
             sender_tag = extract_sender_tag(sender)
+            print(f"[DEBUG] from='{sender}' -> sender_tag='{sender_tag}'")
 
             # 跳过欢迎邮件
             if subject.lower().startswith('welcome to '):
