@@ -77,7 +77,8 @@ GMAIL_QUERY = '''from:(
     capitalflows@substack.com OR
     sleepysol@substack.com OR
     globaltechresearch@substack.com OR
-    citrini@substack.com
+    citrini@substack.com OR
+    swyx@substack.com
 ) -"sign in to substack" -"upgrade to a paid subscription" -"your payment receipt from"'''
 
 # 发件人显示名称映射
@@ -98,6 +99,7 @@ SOURCE_MAPPING = {
     'sleepysol@substack.com': 'SleepySol',
     'globaltechresearch@substack.com': 'GlobalTechResearch',
     'citrini@substack.com': 'Citrini',
+    'swyx@substack.com': 'LatentSpace',
 }
 
 # ============ 股票 Ticker 列表 ============
@@ -1290,7 +1292,7 @@ def sync_gmail_to_notion():
                     existing_urls.add(article_url_norm)
 
                 # 同步到数据库2 (Robs 仅同步到 DB1)
-                if notion2 and sender_tag != "Robs":
+                if notion2 and sender_tag not in ("Robs", "LatentSpace"):
                     try:
                         result2 = notion2.create_page_with_all_blocks(
                             database_id=NOTION_DATABASE_ID_2,
