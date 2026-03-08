@@ -52,6 +52,8 @@ MAX_CHARS_PER_BATCH = 6000
 MAX_BLOCKS_PER_BATCH = 80
 MIN_TEXT_LENGTH = 20
 MIN_TITLE_LENGTH = 5
+DEFAULT_SYNC_LOOKBACK_DAYS = 21
+DEFAULT_NOTION_TIMEOUT_SECONDS = 30
 
 # 翻译开关
 ENABLE_TRANSLATION = os.environ.get("ENABLE_TRANSLATION", "true").lower() == "true"
@@ -370,6 +372,19 @@ def extract_article_url(text: str) -> str:
             return clean_url(match.group(1) if '(' in pattern else match.group(0))
 
     return ""
+
+
+def get_sync_lookback_days() -> int:
+    """同步窗口：同时约束 Gmail 抓取和 Notion 去重，避免窗口错位造成重复"""
+    raw_value = os.environ.get("SYNC_LOOKBACK_DAYS", str(DEFAULT_SYNC_LOOKBACK_DAYS))
+    try:
+        value = int(raw_value)
+        if value < 1:
+            raise ValueError
+        return value
+    except ValueError:
+        print(f"Invalid SYNC_LOOKBACK_DAYS={raw_value!r}, fallback to {DEFAULT_SYNC_LOOKBACK_DAYS}")
+        return DEFAULT_SYNC_LOOKBACK_DAYS
 
 
 # ============ 翻译函数 ============
@@ -944,37 +959,42 @@ class NotionAPI:
             "Notion-Version": "2022-06-28"
         }
 
+    def _request(self, method: str, path: str, body: Dict) -> Dict:
+        response = requests.request(
+            method,
+            f"{self.BASE_URL}{path}",
+            headers=self.headers,
+            json=body,
+            timeout=DEFAULT_NOTION_TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict) and data.get("object") == "error":
+            raise Exception(f"Notion API error: {data.get('code', 'unknown')} - {data.get('message', data)}")
+        return data
+
     def query_database(self, database_id: str, start_cursor: str = None, payload: Dict = None) -> Dict:
-        url = f"{self.BASE_URL}/databases/{database_id}/query"
         body = dict(payload) if payload else {}
         if start_cursor:
             body["start_cursor"] = start_cursor
-        response = requests.post(url, headers=self.headers, json=body)
-        response.raise_for_status()
-        return response.json()
+        return self._request("POST", f"/databases/{database_id}/query", body)
 
     def create_page(self, database_id: str, properties: Dict, children: List[Dict] = None) -> Dict:
-        url = f"{self.BASE_URL}/pages"
         body = {
             "parent": {"database_id": database_id},
             "properties": properties
         }
         if children:
             body["children"] = children[:100]
-        response = requests.post(url, headers=self.headers, json=body)
-        return response.json()
+        return self._request("POST", "/pages", body)
 
     def append_blocks(self, page_id: str, children: List[Dict]) -> Dict:
-        url = f"{self.BASE_URL}/blocks/{page_id}/children"
         body = {"children": children[:100]}
-        response = requests.patch(url, headers=self.headers, json=body)
-        return response.json()
+        return self._request("PATCH", f"/blocks/{page_id}/children", body)
 
     def update_page(self, page_id: str, properties: Dict) -> Dict:
-        url = f"{self.BASE_URL}/pages/{page_id}"
         body = {"properties": properties}
-        response = requests.patch(url, headers=self.headers, json=body)
-        return response.json()
+        return self._request("PATCH", f"/pages/{page_id}", body)
 
     def create_page_with_all_blocks(self, database_id: str, properties: Dict, children: List[Dict]) -> Dict:
         if not children:
@@ -1089,7 +1109,10 @@ def sync_gmail_to_notion():
     print(f"Translation: {'Enabled (DeepSeek)' if ENABLE_TRANSLATION and DEEPSEEK_API_KEY else 'Disabled'}")
 
     max_results = int(os.environ.get("MAX_EMAIL_LIMIT", "50"))
+    lookback_days = get_sync_lookback_days()
+    gmail_query = f"{GMAIL_QUERY} newer_than:{lookback_days}d"
     print(f"Max emails to fetch: {max_results}")
+    print(f"Sync lookback days: {lookback_days}")
 
     # 初始化 Notion API
     notion = NotionAPI(NOTION_API_TOKEN)
@@ -1102,10 +1125,10 @@ def sync_gmail_to_notion():
     # 更新最近 20 条空状态记录为“待处理”
     update_recent_empty_statuses(notion, NOTION_DATABASE_ID, limit=20)
 
-    # 获取已存在的文章 (用于去重，只查最近 7 天)
+    # 获取已存在的文章（用于去重，只查同步窗口内）
     existing_items = set()
     existing_urls = set()
-    cutoff_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    cutoff_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     dedup_filter = {
         "filter": {
             "property": "Date",
@@ -1149,7 +1172,7 @@ def sync_gmail_to_notion():
     print(f"Existing articles in Notion: {len(existing_items)}")
     print(f"Existing URLs in Notion: {len(existing_urls)}")
 
-    # Safety check: 7 天内应有文章，空结果可能是 API 异常
+    # Safety check: 同步窗口内应有文章，空结果可能是 API 异常
     if len(existing_items) == 0:
         print("WARNING: 0 existing articles found, retrying dedup query...")
         existing_items = set()
@@ -1190,7 +1213,7 @@ def sync_gmail_to_notion():
     # 获取邮件
     try:
         gmail_service = get_gmail_service()
-        emails = get_emails(gmail_service, GMAIL_QUERY, max_results=max_results)
+        emails = get_emails(gmail_service, gmail_query, max_results=max_results)
         print(f"Fetched {len(emails)} emails from Gmail")
     except Exception as e:
         print(f"Error fetching emails: {e}")
@@ -1228,8 +1251,8 @@ def sync_gmail_to_notion():
             article_url = extract_article_url(body_text) or extract_article_url(body_html)
             article_url_norm = normalize_url(article_url) if article_url else ""
 
-            # 仅对 GlobalSemiResearch 使用 URL 去重
-            if normalize_sender(sender_tag) == "globalsemiresearch" and article_url_norm:
+            # 优先使用 URL 去重；URL 比标题更稳定
+            if article_url_norm:
                 if article_url_norm in existing_urls:
                     print(f"[SKIP] Duplicate (URL): {subject[:50]}...")
                     continue

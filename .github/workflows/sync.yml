@@ -51,7 +51,7 @@ on:
         default: '50'
 
 concurrency:
-  group: sync
+  group: sync-${{ github.event_name == 'schedule' && 'prod' || github.event.inputs.environment || 'prod' }}
   cancel-in-progress: true
 
 jobs:
