@@ -60,32 +60,15 @@ ENABLE_TRANSLATION = os.environ.get("ENABLE_TRANSLATION", "true").lower() == "tr
 
 # Gmail API
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+EXCLUDED_GMAIL_TERMS = (
+    '"sign in to substack"',
+    '"upgrade to a paid subscription"',
+    '"your payment receipt from"',
+)
 
 # ============ 发件人配置 ============
-# 你的 Substack 订阅源
-GMAIL_QUERY = '''from:(
-    lobwedge@substack.com OR
-    robonomics@substack.com OR
-    purpledrink@substack.com OR
-    nathanbancroft@substack.com OR
-    jamesbulltard@substack.com OR
-    globalsemiresearch@substack.com OR
-    wukong123@substack.com OR
-    robs@substack.com OR
-    oreo521@substack.com OR
-    franktrading@substack.com OR
-    tmtbreakout@substack.com OR
-    semianalysis@substack.com OR
-    capitalflows@substack.com OR
-    sleepysol@substack.com OR
-    globaltechresearch@substack.com OR
-    citrini@substack.com OR
-    swyx@substack.com OR
-    swyx+ainews@substack.com
-) -"sign in to substack" -"upgrade to a paid subscription" -"your payment receipt from"'''
-
-# 发件人显示名称映射
-SOURCE_MAPPING = {
+# 默认发件人显示名称映射
+DEFAULT_SOURCE_MAPPING = {
     'lobwedge@substack.com': 'LW Research',
     'robonomics@substack.com': 'Robonomics',
     'purpledrink@substack.com': 'Purple Drinks',
@@ -105,6 +88,56 @@ SOURCE_MAPPING = {
     'swyx@substack.com': 'LatentSpace',
     'swyx+ainews@substack.com': 'LatentSpace',
 }
+
+
+def load_extra_source_mapping() -> Dict[str, str]:
+    """支持通过环境变量追加 1-2 个新邮件源，无需改代码。"""
+    raw_value = os.environ.get("EXTRA_SUBSTACK_SOURCES", "").strip()
+    if not raw_value:
+        return {}
+
+    extra_sources = {}
+    for entry in re.split(r'[\n,]+', raw_value):
+        item = entry.strip()
+        if not item:
+            continue
+
+        if '=' in item:
+            email_addr, display_name = item.split('=', 1)
+        elif '|' in item:
+            email_addr, display_name = item.split('|', 1)
+        else:
+            raise ValueError(
+                "Invalid EXTRA_SUBSTACK_SOURCES entry. Use email=Display Name, one per line or comma-separated."
+            )
+
+        email_addr = email_addr.strip().lower()
+        display_name = display_name.strip()
+
+        if not email_addr or not display_name:
+            raise ValueError("EXTRA_SUBSTACK_SOURCES contains an empty email or display name.")
+        if '@' not in email_addr:
+            raise ValueError(f"Invalid source email: {email_addr}")
+
+        extra_sources[email_addr] = display_name
+
+    return extra_sources
+
+
+def build_source_mapping() -> Dict[str, str]:
+    source_mapping = dict(DEFAULT_SOURCE_MAPPING)
+    source_mapping.update(load_extra_source_mapping())
+    return source_mapping
+
+
+def build_gmail_query(source_mapping: Dict[str, str]) -> str:
+    sender_filters = " OR\n    ".join(source_mapping.keys())
+    excluded_terms = " ".join(f'-{term}' for term in EXCLUDED_GMAIL_TERMS)
+    return f"from:(\n    {sender_filters}\n) {excluded_terms}"
+
+
+SOURCE_MAPPING = build_source_mapping()
+GMAIL_QUERY = build_gmail_query(SOURCE_MAPPING)
 
 # ============ 股票 Ticker 列表 ============
 STOCK_TICKERS = {
