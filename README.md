@@ -15,6 +15,28 @@ Optional:
 - `NOTION_API_TOKEN_2`
 - `NOTION_DATABASE_ID_2`
 - `DEEPSEEK_API_KEY`
+- `EXTRA_SUBSTACK_SOURCES`
+
+## Add 1-2 more mail sources
+Set `EXTRA_SUBSTACK_SOURCES` in the GitHub environment secret to append new senders without editing code.
+
+Format:
+
+```text
+author1@substack.com=Source Name
+author2@substack.com=Source Name 2
+```
+
+You can also use comma-separated entries:
+
+```text
+author1@substack.com=Source Name,author2@substack.com=Source Name 2
+```
+
+The script will:
+- include these addresses in the Gmail search query
+- map them to the provided display names in Notion `发件人`
+- keep existing sources unchanged
 
 ## Notion database fields
 The script expects these property names (exact match):

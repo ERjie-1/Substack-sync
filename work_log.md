@@ -49,6 +49,14 @@ sync_substack.py
 
 ## Change Log
 
+### 2026-04-07 - 支持通过配置追加 1-2 个新订阅源
+- 变更类型: 功能增强
+- 动机: 当前 issue [JAY-1] 需要确认现有邮件提取是否能再加 1-2 个来源；原实现把发件人列表硬编码在脚本里，每次新增都要改代码
+- 修改文件: `sync_substack.py`, `.github/workflows/sync.yml`, `README.md`
+- 行为影响: 新增可选 secret `EXTRA_SUBSTACK_SOURCES`，支持用 `email=显示名` 的格式追加来源；脚本会自动扩展 Gmail 查询和 Notion 发件人映射，默认来源保持不变
+- 验证结果: 本地生成查询验证通过；支持换行或逗号分隔的 1-2 个新增地址
+- 后续待办: 在 GitHub `prod`/`test` environment 中补充 `EXTRA_SUBSTACK_SOURCES` secret 后，再观察下一次同步是否成功抓到新增来源
+
 ### 2026-03-09 - prod smoke test 验证去重修复
 - 变更类型: 验证 / 运维
 - 动机: 在真实 prod secrets 下验证 2026-03-08 的去重与稳定性修复，避免直接合并后才发现回归
