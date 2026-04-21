@@ -1100,6 +1100,22 @@ def update_recent_empty_statuses(notion: NotionAPI, database_id: str, limit: int
     print(f"Status update done. Updated: {updated}, Skipped: {skipped}, Missing status: {missing_status}")
 
 
+def url_exists_in_notion(notion: NotionAPI, database_id: str, url: str) -> Tuple[bool, Dict]:
+    """Create 前的 URL 精确查询 guard。"""
+    payload = {
+        "page_size": 1,
+        "filter": {
+            "property": "URL",
+            "url": {"equals": url}
+        }
+    }
+    result = notion.query_database(database_id, payload=payload)
+    if result.get("object") == "error":
+        raise Exception(f"Notion query error: {result.get('message', result)}")
+    rows = len(result.get("results", []))
+    return rows > 0, {"rows": rows, "has_more": result.get("has_more", False)}
+
+
 # ============ 主同步函数 ============
 def sync_gmail_to_notion():
     """主同步函数"""
@@ -1128,6 +1144,11 @@ def sync_gmail_to_notion():
     # 获取已存在的文章（用于去重，只查同步窗口内）
     existing_items = set()
     existing_urls = set()
+    dedup_pages_fetched = 0
+    dedup_rows_fetched = 0
+    url_guard_calls = 0
+    url_guard_hits = 0
+    url_guard_fail_closed = 0
     cutoff_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     dedup_filter = {
         "filter": {
@@ -1143,6 +1164,8 @@ def sync_gmail_to_notion():
             result = notion.query_database(NOTION_DATABASE_ID, start_cursor=start_cursor, payload=dedup_filter)
             if result.get("object") == "error":
                 raise Exception(f"Notion query error: {result.get('message', result)}")
+            dedup_pages_fetched += 1
+            dedup_rows_fetched += len(result.get("results", []))
 
             for page in result.get("results", []):
                 props = page.get("properties", {})
@@ -1171,12 +1194,18 @@ def sync_gmail_to_notion():
 
     print(f"Existing articles in Notion: {len(existing_items)}")
     print(f"Existing URLs in Notion: {len(existing_urls)}")
+    print(
+        f"Dedup query stats: cutoff={cutoff_date}, pages_fetched={dedup_pages_fetched}, "
+        f"rows_fetched={dedup_rows_fetched}, existing_items={len(existing_items)}, existing_urls={len(existing_urls)}"
+    )
 
     # Safety check: 同步窗口内应有文章，空结果可能是 API 异常
     if len(existing_items) == 0:
         print("WARNING: 0 existing articles found, retrying dedup query...")
         existing_items = set()
         existing_urls = set()
+        dedup_pages_fetched = 0
+        dedup_rows_fetched = 0
         try:
             has_more = True
             start_cursor = None
@@ -1185,6 +1214,8 @@ def sync_gmail_to_notion():
                 response_obj = result.get("object")
                 if response_obj == "error":
                     raise Exception(f"Notion query error: {result.get('message', result)}")
+                dedup_pages_fetched += 1
+                dedup_rows_fetched += len(result.get("results", []))
                 for page in result.get("results", []):
                     props = page.get("properties", {})
                     title_prop = props.get("Name", {}).get("title", [])
@@ -1206,6 +1237,10 @@ def sync_gmail_to_notion():
             print(f"Retry also failed: {e}")
             exit(1)
         print(f"Retry result - Existing articles: {len(existing_items)}, URLs: {len(existing_urls)}")
+        print(
+            f"Retry dedup stats: cutoff={cutoff_date}, pages_fetched={dedup_pages_fetched}, "
+            f"rows_fetched={dedup_rows_fetched}, existing_items={len(existing_items)}, existing_urls={len(existing_urls)}"
+        )
         if len(existing_items) == 0:
             print("ERROR: Dedup query returned 0 articles twice. Aborting to prevent duplicates.")
             exit(1)
@@ -1250,6 +1285,7 @@ def sync_gmail_to_notion():
             # 提取文章 URL
             article_url = extract_article_url(body_text) or extract_article_url(body_html)
             article_url_norm = normalize_url(article_url) if article_url else ""
+            validated_url = validate_and_fix_url(article_url) if article_url else None
 
             # 优先使用 URL 去重；URL 比标题更稳定
             if article_url_norm:
@@ -1262,6 +1298,25 @@ def sync_gmail_to_notion():
             if unique_id in existing_items:
                 print(f"[SKIP] Duplicate: {subject[:50]}...")
                 continue
+
+            # P0: create 前按 URL 精确查询一次；query 失败时 fail-closed
+            if validated_url:
+                url_guard_calls += 1
+                try:
+                    exists, meta = url_exists_in_notion(notion, NOTION_DATABASE_ID, validated_url)
+                except Exception as e:
+                    url_guard_fail_closed += 1
+                    print(f"[WARN] URL guard query failed, fail-closed skip: {subject[:50]}... - {e}")
+                    continue
+                if exists:
+                    url_guard_hits += 1
+                    print(
+                        f"[SKIP] Duplicate (URL guard): {subject[:50]}... "
+                        f"(rows={meta.get('rows', 0)}, has_more={meta.get('has_more', False)})"
+                    )
+                    existing_urls.add(article_url_norm)
+                    existing_items.add(unique_id)
+                    continue
 
             # 判断类型
             is_chat = 'new thread from' in subject.lower() or '/chat/' in (article_url or '')
@@ -1285,10 +1340,8 @@ def sync_gmail_to_notion():
                 "类型": {"select": {"name": email_type}},
             }
 
-            if article_url:
-                validated_url = validate_and_fix_url(article_url)
-                if validated_url:
-                    properties["URL"] = {"url": validated_url}
+            if validated_url:
+                properties["URL"] = {"url": validated_url}
 
             if tickers:
                 properties["提及公司"] = {
@@ -1342,6 +1395,10 @@ def sync_gmail_to_notion():
 
     print(f"=" * 60)
     print(f"Sync completed! Added {synced_count} new articles")
+    print(
+        f"Guard stats: url_guard_calls={url_guard_calls}, url_guard_hits={url_guard_hits}, "
+        f"url_guard_fail_closed={url_guard_fail_closed}"
+    )
     print(f"=" * 60)
 
 
