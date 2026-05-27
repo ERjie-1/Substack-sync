@@ -81,7 +81,9 @@ GMAIL_QUERY = '''from:(
     globaltechresearch@substack.com OR
     citrini@substack.com OR
     swyx@substack.com OR
-    swyx+ainews@substack.com
+    swyx+ainews@substack.com OR
+    streetsignal@substack.com OR
+    alphaseeker84@substack.com
 ) -"sign in to substack" -"upgrade to a paid subscription" -"your payment receipt from"'''
 
 # 发件人显示名称映射
@@ -104,6 +106,8 @@ SOURCE_MAPPING = {
     'citrini@substack.com': 'Citrini',
     'swyx@substack.com': 'LatentSpace',
     'swyx+ainews@substack.com': 'LatentSpace',
+    'streetsignal@substack.com': 'streetsignal',
+    'alphaseeker84@substack.com': 'Elliot',
 }
 
 # ============ 股票 Ticker 列表 ============

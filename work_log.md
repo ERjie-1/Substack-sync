@@ -49,6 +49,14 @@ sync_substack.py
 
 ## Change Log
 
+### 2026-05-27 - 新增 streetsignal / alphaseeker84 订阅源 (Phase 3C task #83)
+- 变更类型: 新功能
+- 动机: Ejay_ Phase 3C 信息源扩展，新增两个 Substack newsletter 邮件来源
+- 修改文件: `sync_substack.py`（GMAIL_QUERY、SOURCE_MAPPING）
+- 行为影响: 纯新增 2 个发件人 —— `streetsignal@substack.com`（映射 `streetsignal`）+ `alphaseeker84@substack.com`（映射 `Elliot`）加入 GMAIL_QUERY allowlist + SOURCE_MAPPING；**不改任何现有发件人或既有逻辑**（git diff 确认 additive-only，无删除/无逻辑变更）；下次 GitHub Actions cron 自动抓取这两个 sender → 翻译 → Notion DB
+- 验证结果: git diff 确认仅 2 处 additive 改动；Harsh review PASS（最小 scope）；**commit + push 到 ERjie-1/Substack-sync**（注：Scout 初版改动仅本地 working tree、未提交 → GitHub Actions 跑的是 origin/main 旧版、不含新 sender；commit+push 后才真正部署生效）
+- 后续待办: (1) `SOURCE_TO_SECTOR` 待 Ejay_ 告知 streetsignal/Elliot 的 sector 侧重（macro/TMT）后补一行；(2) dedup 已知风险 = Notion `URL` 字段精确匹配，URL 为空/解析失败的邮件首轮可能重复，Alex 安排下次 cron 后 QA 抽查（正例 2 sender 进 Notion / 负例非 allowlist 不进）；(3) `refresh_token.py` 为 untracked 的 token 刷新辅助脚本（非密钥本身，token 在 gmail_token_for_github.json；pre-existing drift，本次未一并提交）
+
 ### 2026-03-09 - prod smoke test 验证去重修复
 - 变更类型: 验证 / 运维
 - 动机: 在真实 prod secrets 下验证 2026-03-08 的去重与稳定性修复，避免直接合并后才发现回归
