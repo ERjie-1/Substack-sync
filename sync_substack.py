@@ -32,6 +32,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Set, Tuple
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlencode
 
 import requests
 from google.oauth2.credentials import Credentials
@@ -57,11 +58,17 @@ DEFAULT_SYNC_LOOKBACK_DAYS = 21
 DEFAULT_NOTION_TIMEOUT_SECONDS = 30
 SYNC_RECEIPT_DIR = Path(os.environ.get("SYNC_RECEIPT_DIR", "sync_receipts"))
 SYNC_LEDGER_PATH = Path(os.environ.get("SYNC_LEDGER_PATH", str(SYNC_RECEIPT_DIR / "message_ledger.json")))
-DISABLE_STATUS_SIDE_EFFECTS = os.environ.get("DISABLE_STATUS_SIDE_EFFECTS", "false").lower() == "true"
 NOTION_GMAIL_MESSAGE_ID_PROPERTY = os.environ.get("NOTION_GMAIL_MESSAGE_ID_PROPERTY", "").strip()
 SYNC_MESSAGE_IDS = {
     value.strip() for value in os.environ.get("SYNC_MESSAGE_IDS", "").split(",") if value.strip()
 }
+# Bounded recovery must not mutate unrelated recent pages (for example, empty
+# status refresh). Keep the explicit env override for test/manual callers, but
+# make the narrow message-id mode fail closed by default.
+DISABLE_STATUS_SIDE_EFFECTS = (
+    os.environ.get("DISABLE_STATUS_SIDE_EFFECTS", "false").lower() == "true"
+    or bool(SYNC_MESSAGE_IDS)
+)
 
 # 翻译开关
 ENABLE_TRANSLATION = os.environ.get("ENABLE_TRANSLATION", "true").lower() == "true"
@@ -1114,6 +1121,23 @@ class NotionAPI:
         body = {"properties": properties}
         return self._request("PATCH", f"/pages/{page_id}", body)
 
+    def count_block_children(self, page_id: str) -> int:
+        """Count all top-level children, following Notion pagination."""
+        count = 0
+        start_cursor = None
+        while True:
+            query = {"page_size": "100"}
+            if start_cursor:
+                query["start_cursor"] = start_cursor
+            path = f"/blocks/{page_id}/children?{urlencode(query)}"
+            result = self._request("GET", path, {})
+            count += len(result.get("results", []))
+            if not result.get("has_more"):
+                return count
+            start_cursor = result.get("next_cursor")
+            if not start_cursor:
+                raise RuntimeError("Notion block children response has_more=true without next_cursor")
+
     def create_page_with_all_blocks(self, database_id: str, properties: Dict, children: List[Dict],
                                     progress_callback=None) -> Dict:
         if not children:
@@ -1364,8 +1388,18 @@ def sync_gmail_to_notion():
         "status_side_effects_disabled": DISABLE_STATUS_SIDE_EFFECTS,
         "failures": [],
         "db2_failures": [],
+        "message_results": [],
         "requested_message_ids": sorted(SYNC_MESSAGE_IDS),
     }
+
+    def record_message_result(email: Dict, **fields):
+        if not SYNC_MESSAGE_IDS:
+            return
+        receipt["message_results"].append({
+            "gmail_message_id": email.get("id", ""),
+            "subject_prefix": email.get("subject", "")[:120],
+            **fields,
+        })
 
     def fail_closed(phase: str, error: Exception):
         record = {
@@ -1405,6 +1439,7 @@ def sync_gmail_to_notion():
     # 获取已存在的文章（用于去重，只查同步窗口内）
     existing_items = set()
     existing_urls = set()
+    existing_pages_by_url = {}
     existing_message_ids = set()
     message_ledger = load_message_ledger()
     existing_message_ids.update(message_ledger.keys())
@@ -1448,6 +1483,7 @@ def sync_gmail_to_notion():
                     norm_url = normalize_url(url_prop)
                     if norm_url:
                         existing_urls.add(norm_url)
+                        existing_pages_by_url.setdefault(norm_url, page.get("id", ""))
                 if NOTION_GMAIL_MESSAGE_ID_PROPERTY:
                     message_id = _property_text(props, NOTION_GMAIL_MESSAGE_ID_PROPERTY)
                     if message_id:
@@ -1472,6 +1508,7 @@ def sync_gmail_to_notion():
         print("WARNING: 0 existing articles found, retrying dedup query...")
         existing_items = set()
         existing_urls = set()
+        existing_pages_by_url = {}
         dedup_pages_fetched = 0
         dedup_rows_fetched = 0
         try:
@@ -1499,6 +1536,7 @@ def sync_gmail_to_notion():
                         norm_url = normalize_url(url_prop)
                         if norm_url:
                             existing_urls.add(norm_url)
+                            existing_pages_by_url.setdefault(norm_url, page.get("id", ""))
                     if NOTION_GMAIL_MESSAGE_ID_PROPERTY:
                         message_id = _property_text(props, NOTION_GMAIL_MESSAGE_ID_PROPERTY)
                         if message_id:
@@ -1579,6 +1617,42 @@ def sync_gmail_to_notion():
             article_url = extract_article_url(body_text) or extract_article_url(body_html)
             article_url_norm = normalize_url(article_url) if article_url else ""
             validated_url = validate_and_fix_url(article_url) if article_url else None
+
+            # A bounded recovery run is allowed to reuse an already-created
+            # partial page found by its stable URL. Normal runs retain the
+            # existing URL dedup behavior and never inspect page children.
+            bounded_recovery_page_id = (
+                existing_pages_by_url.get(article_url_norm, "")
+                if SYNC_MESSAGE_IDS and article_url_norm else ""
+            )
+            if bounded_recovery_page_id and not ledger_entry:
+                try:
+                    existing_block_count = notion.count_block_children(bounded_recovery_page_id)
+                    ledger_entry = {
+                        "page_id": bounded_recovery_page_id,
+                        "db1_state": "partial_page_created",
+                        "db2_state": "pending" if notion2 else "not_applicable",
+                        "blocks_appended": existing_block_count,
+                        "total_blocks": 0,
+                        **_safe_subject(subject),
+                        "date": date_str,
+                        "url": validated_url or "",
+                    }
+                    message_ledger[gmail_message_id] = ledger_entry
+                    write_message_ledger(message_ledger)
+                    recovery_mode = True
+                    print(
+                        f"[BOUNDED_RECOVERY_PAGE] gmail_id={gmail_message_id} "
+                        f"page_id={bounded_recovery_page_id} blocks_existing={existing_block_count}"
+                    )
+                except Exception as exc:
+                    record = failure_record(
+                        email, phase="bounded_recovery_page_lookup", error=exc,
+                        page_id=bounded_recovery_page_id, partial_page_created=True,
+                    )
+                    receipt["failures"].append(record)
+                    print(f"[BOUNDED_RECOVERY_LOOKUP_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
+                    continue
 
             # 优先使用 URL 去重；URL 比标题更稳定
             if article_url_norm and not recovery_mode:
@@ -1669,6 +1743,37 @@ def sync_gmail_to_notion():
             content_blocks = sanitize_blocks_for_notion(content_blocks)
 
             db2_applicable = bool(notion2 and sender_tag not in ("Robs", "LatentSpace"))
+            bounded_page_complete = False
+
+            # A bounded URL lookup must prove the page is incomplete before
+            # appending. If the consumer already has the full top-level block
+            # count, do not duplicate content (or create a second DB2 page).
+            if (
+                recovery_mode
+                and bounded_recovery_page_id
+                and int(ledger_entry.get("blocks_appended", 0)) >= len(content_blocks)
+            ):
+                message_ledger[gmail_message_id].update({
+                    "db1_state": "synced",
+                    "total_blocks": len(content_blocks),
+                })
+                write_message_ledger(message_ledger)
+                bounded_page_complete = True
+                print(f"[BOUNDED_RECOVERY_ALREADY_COMPLETE] page_id={bounded_recovery_page_id} blocks={len(content_blocks)}")
+
+            if bounded_page_complete and not db2_applicable:
+                record_message_result(
+                    email,
+                    page_id=bounded_recovery_page_id,
+                    existing_blocks=int(ledger_entry.get("blocks_appended", 0)),
+                    expected_blocks=len(content_blocks),
+                    blocks_appended=0,
+                    db1_state="synced",
+                    db2_state="not_applicable",
+                    result="already_complete_db2_not_applicable",
+                )
+                skipped_count += 1
+                continue
 
             # A DB1-success/DB2-failed ledger entry is a DB2-only retry. Never
             # create a second DB1 page for this bounded recovery path.
@@ -1677,6 +1782,16 @@ def sync_gmail_to_notion():
                     record = failure_record(email, phase="db2", error=RuntimeError("DB2 retry requested but DB2 is unavailable"), page_id=ledger_entry.get("page_id", ""))
                     receipt["db2_failures"].append(record)
                     receipt["failures"].append(record)
+                    record_message_result(
+                        email,
+                        page_id=ledger_entry.get("page_id", ""),
+                        existing_blocks=int(ledger_entry.get("blocks_appended", 0)),
+                        expected_blocks=len(content_blocks),
+                        blocks_appended=0,
+                        db1_state="synced",
+                        db2_state="not_applicable",
+                        result="db2_not_applicable",
+                    )
                     continue
                 try:
                     db2_page_id = ledger_entry.get("db2_page_id", "")
@@ -1713,6 +1828,16 @@ def sync_gmail_to_notion():
                     message_ledger[gmail_message_id]["db2_state"] = "synced"
                     write_message_ledger(message_ledger)
                     print(f"[DB2_RECOVERED] {subject[:50]}...")
+                    record_message_result(
+                        email,
+                        page_id=ledger_entry.get("page_id", ""),
+                        existing_blocks=int(ledger_entry.get("blocks_appended", 0)),
+                        expected_blocks=len(content_blocks),
+                        blocks_appended=0,
+                        db1_state="synced",
+                        db2_state="synced",
+                        result="already_complete_db1_db2_recovered" if bounded_page_complete else "db2_recovered",
+                    )
                     skipped_count += 1
                     continue
                 except Exception as exc:
@@ -1756,23 +1881,64 @@ def sync_gmail_to_notion():
                     print(f"[DB1_RECOVERY_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
                     continue
                 if not db2_applicable or message_ledger[gmail_message_id].get("db2_state") == "synced":
+                    record_message_result(
+                        email,
+                        page_id=message_ledger[gmail_message_id].get("page_id", ""),
+                        existing_blocks=start,
+                        expected_blocks=len(content_blocks),
+                        blocks_appended=max(0, len(content_blocks) - start),
+                        db1_state=message_ledger[gmail_message_id].get("db1_state", "synced"),
+                        db2_state=message_ledger[gmail_message_id].get("db2_state", "not_applicable"),
+                        result="recovered",
+                    )
                     skipped_count += 1
                     continue
-                # The DB1 recovery path cannot jump back to the DB2-only
-                # branch above. Preserve an explicit retryable failure rather
-                # than silently skipping DB2 after a crash/recovery boundary.
-                if message_ledger[gmail_message_id].get("db2_state") in ("pending", "partial"):
-                    deferred = failure_record(
-                        email,
-                        phase="db2_recovery_deferred",
-                        error=RuntimeError("DB2 recovery deferred after DB1 page recovery; retry is DB2-only"),
-                        page_id=message_ledger[gmail_message_id].get("page_id", ""),
-                    )
-                    receipt["db2_failures"].append(deferred)
-                    receipt["failures"].append(deferred)
-                    message_ledger[gmail_message_id]["db2_state"] = "failed"
-                    write_message_ledger(message_ledger)
-                    continue
+                # Complete DB2 in the same bounded recovery run. The prior
+                # implementation deferred this to a later run, but the
+                # Actions workspace ledger is ephemeral; deferral made a
+                # successful DB1 recovery look incomplete and lost the DB2
+                # retry state across runs.
+                if message_ledger[gmail_message_id].get("db2_state") in ("pending", "partial", "failed"):
+                    try:
+                        def persist_db2_progress(page_id, blocks_appended, total_blocks):
+                            message_ledger[gmail_message_id].update({
+                                "db2_state": "partial",
+                                "db2_page_id": page_id,
+                                "db2_blocks_appended": blocks_appended,
+                                "db2_total_blocks": total_blocks,
+                            })
+                            write_message_ledger(message_ledger)
+                        result2 = notion2.create_page_with_all_blocks(
+                            database_id=NOTION_DATABASE_ID_2,
+                            properties=properties_db2,
+                            children=content_blocks,
+                            progress_callback=persist_db2_progress,
+                        )
+                        if not result2.get("id"):
+                            raise RuntimeError(result2.get("message", str(result2)))
+                        message_ledger[gmail_message_id]["db2_state"] = "synced"
+                        write_message_ledger(message_ledger)
+                        print(f"[DB2_RECOVERED] {subject[:50]}...")
+                        record_message_result(
+                            email,
+                            page_id=message_ledger[gmail_message_id].get("page_id", ""),
+                            existing_blocks=start,
+                            expected_blocks=len(content_blocks),
+                            blocks_appended=max(0, len(content_blocks) - start),
+                            db1_state=message_ledger[gmail_message_id].get("db1_state", "synced"),
+                            db2_state="synced",
+                            result="recovered",
+                        )
+                    except Exception as exc:
+                        record = failure_record(email, phase="db2", error=exc, page_id=message_ledger[gmail_message_id].get("page_id", ""))
+                        receipt["db2_failures"].append(record)
+                        receipt["failures"].append(record)
+                        message_ledger[gmail_message_id]["db2_state"] = "failed"
+                        write_message_ledger(message_ledger)
+                        print(f"[DB2_RECOVERY_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
+                        continue
+                skipped_count += 1
+                continue
 
             # 创建 Notion 页面 (数据库1)
             try:
