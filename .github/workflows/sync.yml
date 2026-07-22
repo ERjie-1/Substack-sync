@@ -49,6 +49,10 @@ on:
         description: 'Maximum emails to fetch'
         required: false
         default: '50'
+      message_ids:
+        description: 'Optional comma-separated Gmail message IDs for bounded recovery'
+        required: false
+        default: ''
 
 concurrency:
   group: sync-${{ github.event_name == 'schedule' && 'prod' || github.event.inputs.environment || 'prod' }}
@@ -83,6 +87,10 @@ jobs:
           GMAIL_TOKEN_BASE64: ${{ secrets.GMAIL_TOKEN_BASE64 }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ENABLE_TRANSLATION: 'true'
+          DISABLE_STATUS_SIDE_EFFECTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'test' && 'true' || 'false' }}
+          NOTION_GMAIL_MESSAGE_ID_PROPERTY: ${{ vars.NOTION_GMAIL_MESSAGE_ID_PROPERTY }}
+          SYNC_RECEIPT_DIR: ./sync_receipts
+          SYNC_MESSAGE_IDS: ${{ github.event.inputs.message_ids || '' }}
           MAX_EMAIL_LIMIT: ${{ github.event.inputs.max_emails || '50' }}
         run: |
           export GMAIL_TOKEN="$(echo "$GMAIL_TOKEN_BASE64" | base64 --decode)"
@@ -91,6 +99,14 @@ jobs:
           # Extract synced count from "Added N new articles"
           NEW_COUNT=$(echo "$OUTPUT" | grep -oP 'Added \K\d+' || echo "0")
           echo "new_articles=$NEW_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sync receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: substack-sync-receipt-${{ github.run_id }}
+          path: sync_receipts/
+          if-no-files-found: warn
 
       - name: Dispatch to article processor
         if: success() && steps.sync.outputs.new_articles != '0'

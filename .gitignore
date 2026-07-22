@@ -45,3 +45,4 @@ test_*.py
 
 # Gmail token for GitHub (contains secrets!)
 gmail_token_for_github.json
+sync_receipts/

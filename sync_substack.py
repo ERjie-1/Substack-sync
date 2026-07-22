@@ -28,6 +28,7 @@ import html
 import quopri
 import hashlib
 import time
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 from email.utils import parsedate_to_datetime
@@ -54,12 +55,75 @@ MIN_TEXT_LENGTH = 20
 MIN_TITLE_LENGTH = 5
 DEFAULT_SYNC_LOOKBACK_DAYS = 21
 DEFAULT_NOTION_TIMEOUT_SECONDS = 30
+SYNC_RECEIPT_DIR = Path(os.environ.get("SYNC_RECEIPT_DIR", "sync_receipts"))
+SYNC_LEDGER_PATH = Path(os.environ.get("SYNC_LEDGER_PATH", str(SYNC_RECEIPT_DIR / "message_ledger.json")))
+DISABLE_STATUS_SIDE_EFFECTS = os.environ.get("DISABLE_STATUS_SIDE_EFFECTS", "false").lower() == "true"
+NOTION_GMAIL_MESSAGE_ID_PROPERTY = os.environ.get("NOTION_GMAIL_MESSAGE_ID_PROPERTY", "").strip()
+SYNC_MESSAGE_IDS = {
+    value.strip() for value in os.environ.get("SYNC_MESSAGE_IDS", "").split(",") if value.strip()
+}
 
 # 翻译开关
 ENABLE_TRANSLATION = os.environ.get("ENABLE_TRANSLATION", "true").lower() == "true"
 
 # Gmail API
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+
+
+class NotionRequestError(Exception):
+    """HTTP/API failure with safe diagnostics for receipts and logs."""
+
+    def __init__(self, message: str, *, status_code=None, path="", payload_sha256="",
+                 request_id="", notion_code="", notion_message=""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.path = path
+        self.payload_sha256 = payload_sha256
+        self.request_id = request_id
+        self.notion_code = notion_code
+        self.notion_message = notion_message
+
+
+class NotionWriteError(Exception):
+    """Identifies the write phase and whether a page was already created."""
+
+    def __init__(self, phase: str, cause: Exception, page_id: str = "", blocks_appended: int = 0,
+                 total_blocks: int = 0):
+        self.phase = phase
+        self.cause = cause
+        self.page_id = page_id
+        self.partial_page_created = bool(page_id)
+        self.blocks_appended = blocks_appended
+        self.total_blocks = total_blocks
+        super().__init__(f"Notion write failed in {phase}: {cause}")
+
+
+def _sha256_json(value) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _redact_sensitive(value):
+    """Redact credential-shaped fields without logging email bodies."""
+    sensitive = ("authorization", "token", "cookie", "secret", "password", "api_key", "apikey")
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if any(part in key.lower() for part in sensitive)
+            else _redact_sensitive(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value[:10]]
+    if isinstance(value, str):
+        return value[:1000]
+    return value
+
+
+def _safe_subject(subject: str) -> dict:
+    return {
+        "subject_sha256": hashlib.sha256(subject.encode("utf-8", errors="ignore")).hexdigest(),
+        "subject_prefix": subject[:100],
+    }
 
 # ============ 发件人配置 ============
 # 你的 Substack 订阅源
@@ -971,10 +1035,51 @@ class NotionAPI:
             json=body,
             timeout=DEFAULT_NOTION_TIMEOUT_SECONDS
         )
-        response.raise_for_status()
+        payload_sha256 = _sha256_json(body)
+        if not response.ok:
+            try:
+                raw_error = response.json()
+            except ValueError:
+                raw_error = {"raw": response.text[:1000]}
+            safe_error = _redact_sensitive(raw_error)
+            request_id = response.headers.get("x-request-id", "")
+            if isinstance(raw_error, dict):
+                request_id = request_id or raw_error.get("request_id", "")
+            notion_code = raw_error.get("code", "") if isinstance(raw_error, dict) else ""
+            notion_message = raw_error.get("message", "") if isinstance(raw_error, dict) else ""
+            diagnostic = {
+                "status_code": response.status_code,
+                "method": method,
+                "path": path,
+                "request_id": request_id,
+                "notion_code": notion_code,
+                "notion_message": notion_message,
+                "payload_sha256": payload_sha256,
+                "response": safe_error,
+            }
+            print(f"[NOTION_HTTP_ERROR] {json.dumps(diagnostic, ensure_ascii=False, sort_keys=True)}")
+            raise NotionRequestError(
+                f"HTTP {response.status_code} for {method} {path}: {notion_message or 'Notion request failed'}",
+                status_code=response.status_code,
+                path=path,
+                payload_sha256=payload_sha256,
+                request_id=request_id,
+                notion_code=notion_code,
+                notion_message=notion_message,
+            )
         data = response.json()
         if isinstance(data, dict) and data.get("object") == "error":
-            raise Exception(f"Notion API error: {data.get('code', 'unknown')} - {data.get('message', data)}")
+            safe_error = _redact_sensitive(data)
+            print(f"[NOTION_API_ERROR] {json.dumps(safe_error, ensure_ascii=False, sort_keys=True)}")
+            raise NotionRequestError(
+                f"Notion API error: {data.get('code', 'unknown')} - {data.get('message', data)}",
+                status_code=response.status_code,
+                path=path,
+                payload_sha256=payload_sha256,
+                request_id=data.get("request_id", ""),
+                notion_code=data.get("code", ""),
+                notion_message=data.get("message", ""),
+            )
         return data
 
     def query_database(self, database_id: str, start_cursor: str = None, payload: Dict = None) -> Dict:
@@ -1000,21 +1105,42 @@ class NotionAPI:
         body = {"properties": properties}
         return self._request("PATCH", f"/pages/{page_id}", body)
 
-    def create_page_with_all_blocks(self, database_id: str, properties: Dict, children: List[Dict]) -> Dict:
+    def create_page_with_all_blocks(self, database_id: str, properties: Dict, children: List[Dict],
+                                    progress_callback=None) -> Dict:
         if not children:
             children = []
 
-        result = self.create_page(database_id, properties, children[:100])
+        try:
+            # Create the page without content first so property and block errors
+            # are isolated and a partial-page failure is explicit.
+            result = self.create_page(database_id, properties)
+        except Exception as exc:
+            raise NotionWriteError("create_page", exc) from exc
 
         if not result.get("id"):
             return result
 
         page_id = result["id"]
         remaining = children[100:]
+        first_batch = children[:100]
+        if first_batch:
+            remaining = first_batch + remaining
+        blocks_appended = 0
+        if progress_callback:
+            progress_callback(page_id, blocks_appended, len(children))
         while remaining:
             batch = remaining[:100]
             remaining = remaining[100:]
-            self.append_blocks(page_id, batch)
+            try:
+                self.append_blocks(page_id, batch)
+            except Exception as exc:
+                raise NotionWriteError(
+                    "append_blocks", exc, page_id=page_id,
+                    blocks_appended=blocks_appended, total_blocks=len(children)
+                ) from exc
+            blocks_appended += len(batch)
+            if progress_callback:
+                progress_callback(page_id, blocks_appended, len(children))
 
         return result
 
@@ -1120,6 +1246,72 @@ def url_exists_in_notion(notion: NotionAPI, database_id: str, url: str) -> Tuple
     return rows > 0, {"rows": rows, "has_more": result.get("has_more", False)}
 
 
+def _property_text(properties: Dict, property_name: str) -> str:
+    """Read a title/rich_text property without assuming one Notion type."""
+    prop = properties.get(property_name, {})
+    for key in ("rich_text", "title"):
+        values = prop.get(key, []) or []
+        if values:
+            return values[0].get("plain_text") or values[0].get("text", {}).get("content", "")
+    return ""
+
+
+def write_sync_receipt(receipt: Dict) -> str:
+    SYNC_RECEIPT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = SYNC_RECEIPT_DIR / f"substack_sync_{stamp}.json"
+    path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"[RECEIPT] path={path} status={receipt.get('status')} failures={receipt.get('failure_count', 0)}")
+    return str(path)
+
+
+def load_message_ledger() -> Dict[str, Dict]:
+    if not SYNC_LEDGER_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SYNC_LEDGER_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError) as exc:
+        print(f"[LEDGER] unreadable; failing closed: {exc}")
+        raise SystemExit(1)
+
+
+def write_message_ledger(ledger: Dict[str, Dict]) -> None:
+    SYNC_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SYNC_LEDGER_PATH.write_text(json.dumps(ledger, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"[LEDGER] path={SYNC_LEDGER_PATH} entries={len(ledger)}")
+
+
+def failure_record(email: Dict, *, phase: str, error: Exception, page_id: str = "",
+                   partial_page_created: bool = False) -> Dict:
+    if isinstance(error, NotionWriteError):
+        phase = error.phase
+        page_id = error.page_id
+        partial_page_created = error.partial_page_created
+        error = error.cause
+    subject = email.get("subject", "")
+    record = {
+        "gmail_message_id": email.get("id", ""),
+        "phase": phase,
+        "page_id": page_id,
+        "partial_page_created": partial_page_created,
+        **_safe_subject(subject),
+        "body_sha256": hashlib.sha256(email.get("body_html", "").encode("utf-8", errors="ignore")).hexdigest(),
+        "error_type": type(error).__name__,
+        "error": str(error)[:500],
+    }
+    if isinstance(error, NotionRequestError):
+        record.update({
+            "status_code": error.status_code,
+            "path": error.path,
+            "request_id": error.request_id,
+            "notion_code": error.notion_code,
+            "notion_message": error.notion_message,
+            "payload_sha256": error.payload_sha256,
+        })
+    return record
+
+
 # ============ 主同步函数 ============
 def sync_gmail_to_notion():
     """主同步函数"""
@@ -1134,6 +1326,48 @@ def sync_gmail_to_notion():
     print(f"Max emails to fetch: {max_results}")
     print(f"Sync lookback days: {lookback_days}")
 
+    receipt = {
+        "schema_version": "substack_sync_receipt_v2",
+        "run_started_at": datetime.now().isoformat(),
+        "status": "RUNNING",
+        "max_email_limit": max_results,
+        "lookback_days": lookback_days,
+        "idempotency_mode": "gmail_message_id_property" if NOTION_GMAIL_MESSAGE_ID_PROPERTY else "in_run_gmail_id_plus_legacy_keys",
+        "message_id_property": NOTION_GMAIL_MESSAGE_ID_PROPERTY or None,
+        "ledger_path": str(SYNC_LEDGER_PATH),
+        "status_side_effects_disabled": DISABLE_STATUS_SIDE_EFFECTS,
+        "failures": [],
+        "db2_failures": [],
+        "requested_message_ids": sorted(SYNC_MESSAGE_IDS),
+    }
+
+    def fail_closed(phase: str, error: Exception):
+        record = {
+            "phase": phase,
+            "error_type": type(error).__name__,
+            "error": str(error)[:500],
+        }
+        receipt.update({
+            "run_finished_at": datetime.now().isoformat(),
+            "status": "FAIL",
+            "failures": [record],
+            "failure_count": 1,
+            "db2_failure_count": 0,
+        })
+        write_sync_receipt(receipt)
+        print(f"[SETUP_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
+        raise SystemExit(1)
+
+    # GitHub-hosted runners are ephemeral: a local ledger cannot provide
+    # cross-run idempotency. Production therefore requires a durable Notion
+    # message-id property; the ledger remains useful for same-run/test and
+    # partial-page recovery evidence.
+    if not DISABLE_STATUS_SIDE_EFFECTS and not NOTION_GMAIL_MESSAGE_ID_PROPERTY:
+        fail_closed(
+            "idempotency_config",
+            RuntimeError("production requires NOTION_GMAIL_MESSAGE_ID_PROPERTY; ephemeral ledger is not cross-run durable"),
+        )
+
     # 初始化 Notion API
     notion = NotionAPI(NOTION_API_TOKEN)
     notion2 = NotionAPI(NOTION_API_TOKEN_2) if NOTION_API_TOKEN_2 and NOTION_DATABASE_ID_2 else None
@@ -1142,12 +1376,18 @@ def sync_gmail_to_notion():
     else:
         print("DB2: Disabled (missing NOTION_API_TOKEN_2 or NOTION_DATABASE_ID_2)")
 
-    # 更新最近 20 条空状态记录为“待处理”
-    update_recent_empty_statuses(notion, NOTION_DATABASE_ID, limit=20)
+    # Smoke runs must not mutate unrelated pages before processing the candidate.
+    if DISABLE_STATUS_SIDE_EFFECTS:
+        print("[SIDE_EFFECTS] update_recent_empty_statuses disabled")
+    else:
+        update_recent_empty_statuses(notion, NOTION_DATABASE_ID, limit=20)
 
     # 获取已存在的文章（用于去重，只查同步窗口内）
     existing_items = set()
     existing_urls = set()
+    existing_message_ids = set()
+    message_ledger = load_message_ledger()
+    existing_message_ids.update(message_ledger.keys())
     dedup_pages_fetched = 0
     dedup_rows_fetched = 0
     url_guard_calls = 0
@@ -1188,13 +1428,17 @@ def sync_gmail_to_notion():
                     norm_url = normalize_url(url_prop)
                     if norm_url:
                         existing_urls.add(norm_url)
+                if NOTION_GMAIL_MESSAGE_ID_PROPERTY:
+                    message_id = _property_text(props, NOTION_GMAIL_MESSAGE_ID_PROPERTY)
+                    if message_id:
+                        existing_message_ids.add(message_id)
 
             has_more = result.get("has_more", False)
             start_cursor = result.get("next_cursor")
 
     except Exception as e:
         print(f"Error fetching existing items: {e}")
-        exit(1)
+        fail_closed("dedup_query", e)
 
     print(f"Existing articles in Notion: {len(existing_items)}")
     print(f"Existing URLs in Notion: {len(existing_urls)}")
@@ -1235,11 +1479,15 @@ def sync_gmail_to_notion():
                         norm_url = normalize_url(url_prop)
                         if norm_url:
                             existing_urls.add(norm_url)
+                    if NOTION_GMAIL_MESSAGE_ID_PROPERTY:
+                        message_id = _property_text(props, NOTION_GMAIL_MESSAGE_ID_PROPERTY)
+                        if message_id:
+                            existing_message_ids.add(message_id)
                 has_more = result.get("has_more", False)
                 start_cursor = result.get("next_cursor")
         except Exception as e:
             print(f"Retry also failed: {e}")
-            exit(1)
+            fail_closed("dedup_query_retry", e)
         print(f"Retry result - Existing articles: {len(existing_items)}, URLs: {len(existing_urls)}")
         print(
             f"Retry dedup stats: cutoff={cutoff_date}, pages_fetched={dedup_pages_fetched}, "
@@ -1247,32 +1495,48 @@ def sync_gmail_to_notion():
         )
         if len(existing_items) == 0:
             print("ERROR: Dedup query returned 0 articles twice. Aborting to prevent duplicates.")
-            exit(1)
+            fail_closed("dedup_empty_twice", RuntimeError("dedup query returned zero existing articles twice"))
 
     # 获取邮件
     try:
         gmail_service = get_gmail_service()
         emails = get_emails(gmail_service, gmail_query, max_results=max_results)
+        if SYNC_MESSAGE_IDS:
+            fetched_ids = {email.get("id", "") for email in emails}
+            missing_ids = sorted(SYNC_MESSAGE_IDS - fetched_ids)
+            receipt["requested_message_ids_missing"] = missing_ids
+            if missing_ids:
+                print(f"[CANDIDATE_MISSING] requested Gmail ids not fetched: {missing_ids}")
+                raise RuntimeError("bounded candidate list contains Gmail ids not present in fetched window")
+            emails = [email for email in emails if email.get("id", "") in SYNC_MESSAGE_IDS]
+            print(f"[CANDIDATES] bounded Gmail ids: {[email.get('id', '') for email in emails]}")
         print(f"Fetched {len(emails)} emails from Gmail")
     except Exception as e:
         print(f"Error fetching emails: {e}")
-        exit(1)
+        fail_closed("gmail_fetch", e)
 
     # 同步邮件
     synced_count = 0
+    processed_count = 0
+    skipped_count = 0
 
     for email in emails:
         try:
+            processed_count += 1
             subject = email['subject']
             sender = email['from']
             body_html = email['body_html']
             body_text = email['body_text']
             sender_tag = extract_sender_tag(sender)
+            gmail_message_id = email.get("id", "")
+            ledger_entry = message_ledger.get(gmail_message_id, {})
+            recovery_mode = ledger_entry.get("db1_state") in ("page_created", "partial_page_created", "appending") or ledger_entry.get("db2_state") in ("pending", "partial", "failed")
             print(f"[DEBUG] from='{sender}' -> sender_tag='{sender_tag}'")
 
             # 跳过欢迎邮件
             if subject.lower().startswith('welcome to '):
                 print(f"[SKIP] Welcome email: {subject[:50]}...")
+                skipped_count += 1
                 continue
 
             # 解析日期
@@ -1292,25 +1556,38 @@ def sync_gmail_to_notion():
             validated_url = validate_and_fix_url(article_url) if article_url else None
 
             # 优先使用 URL 去重；URL 比标题更稳定
-            if article_url_norm:
+            if article_url_norm and not recovery_mode:
                 if article_url_norm in existing_urls:
                     print(f"[SKIP] Duplicate (URL): {subject[:50]}...")
+                    skipped_count += 1
                     continue
+
+            if gmail_message_id in message_ledger and not recovery_mode:
+                print(f"[SKIP] Duplicate (local Gmail ledger): {gmail_message_id}")
+                skipped_count += 1
+                continue
+
+            if NOTION_GMAIL_MESSAGE_ID_PROPERTY and gmail_message_id in existing_message_ids and not recovery_mode:
+                print(f"[SKIP] Duplicate (Gmail message id): {gmail_message_id}")
+                skipped_count += 1
+                continue
 
             # 检查是否已存在 (默认逻辑)
             unique_id = generate_unique_id(subject[:200], sender_tag, date_str)
-            if unique_id in existing_items:
+            if unique_id in existing_items and not recovery_mode:
                 print(f"[SKIP] Duplicate: {subject[:50]}...")
+                skipped_count += 1
                 continue
 
             # P0: create 前按 URL 精确查询一次；query 失败时 fail-closed
-            if validated_url:
+            if validated_url and not recovery_mode:
                 url_guard_calls += 1
                 try:
                     exists, meta = url_exists_in_notion(notion, NOTION_DATABASE_ID, validated_url)
                 except Exception as e:
                     url_guard_fail_closed += 1
                     print(f"[WARN] URL guard query failed, fail-closed skip: {subject[:50]}... - {e}")
+                    skipped_count += 1
                     continue
                 if exists:
                     url_guard_hits += 1
@@ -1320,6 +1597,7 @@ def sync_gmail_to_notion():
                     )
                     existing_urls.add(article_url_norm)
                     existing_items.add(unique_id)
+                    skipped_count += 1
                     continue
 
             # 判断类型
@@ -1352,6 +1630,11 @@ def sync_gmail_to_notion():
                     "multi_select": [{"name": t} for t in tickers[:10]]
                 }
 
+            if NOTION_GMAIL_MESSAGE_ID_PROPERTY:
+                properties[NOTION_GMAIL_MESSAGE_ID_PROPERTY] = {
+                    "rich_text": [{"type": "text", "text": {"content": gmail_message_id}}]
+                }
+
             # 数据库1：增加“状态=待处理”，数据库2不加
             properties_db1 = dict(properties)
             properties_db1["状态"] = {"select": {"name": "待处理"}}
@@ -1360,12 +1643,145 @@ def sync_gmail_to_notion():
             # 清理无效链接
             content_blocks = sanitize_blocks_for_notion(content_blocks)
 
+            db2_applicable = bool(notion2 and sender_tag not in ("Robs", "LatentSpace"))
+
+            # A DB1-success/DB2-failed ledger entry is a DB2-only retry. Never
+            # create a second DB1 page for this bounded recovery path.
+            if recovery_mode and ledger_entry.get("db1_state") == "synced" and ledger_entry.get("db2_state") in ("pending", "partial", "failed"):
+                if not db2_applicable:
+                    record = failure_record(email, phase="db2", error=RuntimeError("DB2 retry requested but DB2 is unavailable"), page_id=ledger_entry.get("page_id", ""))
+                    receipt["db2_failures"].append(record)
+                    receipt["failures"].append(record)
+                    continue
+                try:
+                    db2_page_id = ledger_entry.get("db2_page_id", "")
+                    db2_start = int(ledger_entry.get("db2_blocks_appended", 0))
+                    if db2_page_id:
+                        for offset in range(db2_start, len(content_blocks), 100):
+                            batch = content_blocks[offset:offset + 100]
+                            notion2.append_blocks(db2_page_id, batch)
+                            message_ledger[gmail_message_id].update({
+                                "db2_state": "partial",
+                                "db2_page_id": db2_page_id,
+                                "db2_blocks_appended": offset + len(batch),
+                                "db2_total_blocks": len(content_blocks),
+                            })
+                            write_message_ledger(message_ledger)
+                        result2 = {"id": db2_page_id}
+                    else:
+                        def persist_db2_progress(page_id, blocks_appended, total_blocks):
+                            message_ledger[gmail_message_id].update({
+                                "db2_state": "partial",
+                                "db2_page_id": page_id,
+                                "db2_blocks_appended": blocks_appended,
+                                "db2_total_blocks": total_blocks,
+                            })
+                            write_message_ledger(message_ledger)
+                        result2 = notion2.create_page_with_all_blocks(
+                            database_id=NOTION_DATABASE_ID_2,
+                            properties=properties_db2,
+                            children=content_blocks,
+                            progress_callback=persist_db2_progress,
+                        )
+                    if not result2.get("id"):
+                        raise RuntimeError(result2.get("message", str(result2)))
+                    message_ledger[gmail_message_id]["db2_state"] = "synced"
+                    write_message_ledger(message_ledger)
+                    print(f"[DB2_RECOVERED] {subject[:50]}...")
+                    skipped_count += 1
+                    continue
+                except Exception as exc:
+                    record = failure_record(email, phase="db2", error=exc, page_id=ledger_entry.get("page_id", ""))
+                    receipt["db2_failures"].append(record)
+                    receipt["failures"].append(record)
+                    message_ledger[gmail_message_id]["db2_state"] = "failed"
+                    write_message_ledger(message_ledger)
+                    print(f"[DB2_RECOVERY_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
+                    continue
+
+            def persist_progress(page_id, blocks_appended, total_blocks):
+                message_ledger[gmail_message_id] = {
+                    **ledger_entry,
+                    "page_id": page_id,
+                    "db1_state": "page_created" if blocks_appended == 0 else "appending",
+                    "db2_state": ledger_entry.get("db2_state", "pending" if db2_applicable else "not_applicable"),
+                    "blocks_appended": blocks_appended,
+                    "total_blocks": total_blocks,
+                    **_safe_subject(subject),
+                    "date": date_str,
+                    "url": validated_url or "",
+                }
+                write_message_ledger(message_ledger)
+
+            # Recover a known partial page by appending only the missing blocks.
+            if recovery_mode and ledger_entry.get("db1_state") in ("page_created", "partial_page_created", "appending") and ledger_entry.get("page_id"):
+                page_id = ledger_entry["page_id"]
+                start = int(ledger_entry.get("blocks_appended", 0))
+                try:
+                    for offset in range(start, len(content_blocks), 100):
+                        batch = content_blocks[offset:offset + 100]
+                        notion.append_blocks(page_id, batch)
+                        persist_progress(page_id, offset + len(batch), len(content_blocks))
+                    message_ledger[gmail_message_id].update({"db1_state": "synced", "db2_state": ledger_entry.get("db2_state", "pending")})
+                    write_message_ledger(message_ledger)
+                    print(f"[DB1_RECOVERED] page_id={page_id} blocks={len(content_blocks)}")
+                except Exception as exc:
+                    record = failure_record(email, phase="append_blocks", error=exc, page_id=page_id, partial_page_created=True)
+                    receipt["failures"].append(record)
+                    print(f"[DB1_RECOVERY_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
+                    continue
+                if not db2_applicable or message_ledger[gmail_message_id].get("db2_state") == "synced":
+                    skipped_count += 1
+                    continue
+                # The DB1 recovery path cannot jump back to the DB2-only
+                # branch above. Preserve an explicit retryable failure rather
+                # than silently skipping DB2 after a crash/recovery boundary.
+                if message_ledger[gmail_message_id].get("db2_state") in ("pending", "partial"):
+                    deferred = failure_record(
+                        email,
+                        phase="db2_recovery_deferred",
+                        error=RuntimeError("DB2 recovery deferred after DB1 page recovery; retry is DB2-only"),
+                        page_id=message_ledger[gmail_message_id].get("page_id", ""),
+                    )
+                    receipt["db2_failures"].append(deferred)
+                    receipt["failures"].append(deferred)
+                    message_ledger[gmail_message_id]["db2_state"] = "failed"
+                    write_message_ledger(message_ledger)
+                    continue
+
             # 创建 Notion 页面 (数据库1)
-            result = notion.create_page_with_all_blocks(
-                database_id=NOTION_DATABASE_ID,
-                properties=properties_db1,
-                children=content_blocks
-            )
+            try:
+                result = notion.create_page_with_all_blocks(
+                    database_id=NOTION_DATABASE_ID,
+                    properties=properties_db1,
+                    children=content_blocks,
+                    progress_callback=persist_progress
+                )
+            except NotionWriteError as exc:
+                record = failure_record(
+                    email,
+                    phase=exc.phase,
+                    error=exc.cause,
+                    page_id=exc.page_id,
+                    partial_page_created=exc.partial_page_created,
+                )
+                receipt["failures"].append(record)
+                if exc.page_id and gmail_message_id:
+                    # Preserve the page id so a later bounded retry cannot
+                    # create a second page after an append failure.
+                    message_ledger[gmail_message_id] = {
+                        "page_id": exc.page_id,
+                        "db1_state": "partial_page_created",
+                        "db2_state": "pending" if db2_applicable else "not_applicable",
+                        "blocks_appended": exc.blocks_appended,
+                        "total_blocks": exc.total_blocks,
+                        **_safe_subject(subject),
+                        "date": date_str,
+                        "url": validated_url or "",
+                    }
+                    write_message_ledger(message_ledger)
+                print(f"[DB1_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
+                continue
 
             if result.get("id"):
                 print(f"[DB1] Synced: {subject[:50]}...")
@@ -1373,30 +1789,89 @@ def sync_gmail_to_notion():
                 existing_items.add(unique_id)
                 if article_url_norm:
                     existing_urls.add(article_url_norm)
+                if NOTION_GMAIL_MESSAGE_ID_PROPERTY:
+                    existing_message_ids.add(gmail_message_id)
+                message_ledger[gmail_message_id] = {
+                    "page_id": result.get("id", ""),
+                    "db1_state": "synced",
+                    "db2_state": "pending" if db2_applicable else "not_applicable",
+                    "blocks_appended": len(content_blocks),
+                    "total_blocks": len(content_blocks),
+                    **_safe_subject(subject),
+                    "date": date_str,
+                    "url": validated_url or "",
+                }
+                write_message_ledger(message_ledger)
 
                 # 同步到数据库2 (Robs 仅同步到 DB1)
                 if notion2 and sender_tag not in ("Robs", "LatentSpace"):
                     try:
+                        def persist_db2_progress(page_id, blocks_appended, total_blocks):
+                            message_ledger[gmail_message_id].update({
+                                "db2_state": "partial",
+                                "db2_page_id": page_id,
+                                "db2_blocks_appended": blocks_appended,
+                                "db2_total_blocks": total_blocks,
+                            })
+                            write_message_ledger(message_ledger)
                         result2 = notion2.create_page_with_all_blocks(
                             database_id=NOTION_DATABASE_ID_2,
                             properties=properties_db2,
-                            children=content_blocks
+                            children=content_blocks,
+                            progress_callback=persist_db2_progress,
                         )
                         if result2.get("id"):
                             print(f"[DB2] Synced: {subject[:50]}...")
+                            message_ledger[gmail_message_id]["db2_state"] = "synced"
+                            write_message_ledger(message_ledger)
                         else:
                             error_msg2 = result2.get('message', str(result2))
                             print(f"[DB2] Failed: {subject[:50]}... - {error_msg2}")
+                            message_ledger[gmail_message_id]["db2_state"] = "failed"
+                            write_message_ledger(message_ledger)
+                            db2_record = failure_record(email, phase="db2", error=RuntimeError(error_msg2))
+                            receipt["db2_failures"].append(db2_record)
+                            receipt["failures"].append(db2_record)
                     except Exception as e2:
-                        print(f"[DB2] Failed: {subject[:50]}... - {e2}")
+                        db2_page_id = getattr(e2, "page_id", "")
+                        db2_record = failure_record(email, phase="db2", error=e2, page_id=db2_page_id, partial_page_created=bool(db2_page_id))
+                        receipt["db2_failures"].append(db2_record)
+                        receipt["failures"].append(db2_record)
+                        message_ledger[gmail_message_id]["db2_state"] = "failed"
+                        write_message_ledger(message_ledger)
+                        print(f"[DB2_FAILED] {json.dumps(db2_record, ensure_ascii=False, sort_keys=True)}")
             else:
-                error_msg = result.get('message', str(result))
-                print(f"[DB1] Failed: {subject[:50]}... - {error_msg}")
+                record = failure_record(
+                    email,
+                    phase="create_page",
+                    error=RuntimeError(result.get('message', str(result))),
+                )
+                receipt["failures"].append(record)
+                print(f"[DB1_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
 
         except Exception as e:
-            print(f"Error processing email: {email.get('subject', 'unknown')[:30]}... - {e}")
+            record = failure_record(email, phase="process_email", error=e)
+            receipt["failures"].append(record)
+            print(f"[EMAIL_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
             continue
 
+    receipt.update({
+        "run_finished_at": datetime.now().isoformat(),
+        "status": "FAIL" if receipt["failures"] else "PASS",
+        "fetched_count": len(emails),
+        "processed_count": processed_count,
+        "synced_count": synced_count,
+        "skipped_count": skipped_count,
+        "failure_count": len(receipt["failures"]),
+        "db2_failure_count": len(receipt["db2_failures"]),
+        "guard_stats": {
+            "url_guard_calls": url_guard_calls,
+            "url_guard_hits": url_guard_hits,
+            "url_guard_fail_closed": url_guard_fail_closed,
+        },
+    })
+    write_message_ledger(message_ledger)
+    write_sync_receipt(receipt)
     print(f"=" * 60)
     print(f"Sync completed! Added {synced_count} new articles")
     print(
@@ -1404,18 +1879,38 @@ def sync_gmail_to_notion():
         f"url_guard_fail_closed={url_guard_fail_closed}"
     )
     print(f"=" * 60)
+    if receipt["failures"]:
+        print(f"ERROR: {len(receipt['failures'])} write/processing failure(s); failing closed")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
+    def bootstrap_failure_receipt(phase, message):
+        receipt = {
+            "schema_version": "substack_sync_receipt_v2",
+            "run_started_at": datetime.now().isoformat(),
+            "run_finished_at": datetime.now().isoformat(),
+            "status": "FAIL",
+            "phase": phase,
+            "error": str(message)[:500],
+            "failures": [{"phase": phase, "error_type": "RuntimeError", "error": str(message)[:500]}],
+            "failure_count": 1,
+            "db2_failure_count": 0,
+        }
+        write_sync_receipt(receipt)
+
     # 检查必需的环境变量
     if not NOTION_API_TOKEN:
         print("Error: NOTION_API_TOKEN environment variable not set")
-        exit(1)
+        bootstrap_failure_receipt("bootstrap_env", "NOTION_API_TOKEN environment variable not set")
+        raise SystemExit(1)
     if not NOTION_DATABASE_ID:
         print("Error: NOTION_DATABASE_ID environment variable not set")
-        exit(1)
+        bootstrap_failure_receipt("bootstrap_env", "NOTION_DATABASE_ID environment variable not set")
+        raise SystemExit(1)
     if not os.environ.get("GMAIL_TOKEN"):
         print("Error: GMAIL_TOKEN environment variable not set")
-        exit(1)
+        bootstrap_failure_receipt("bootstrap_env", "GMAIL_TOKEN environment variable not set")
+        raise SystemExit(1)
 
     sync_gmail_to_notion()
