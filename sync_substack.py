@@ -1178,6 +1178,24 @@ class NotionAPI:
         return result
 
 
+def _split_notion_text(content: str, max_utf16_units: int = 2000) -> List[str]:
+    """Split text using Notion's UTF-16 length accounting."""
+    fragments = []
+    current = []
+    units = 0
+    for char in content:
+        char_units = len(char.encode("utf-16-le")) // 2
+        if current and units + char_units > max_utf16_units:
+            fragments.append("".join(current))
+            current = []
+            units = 0
+        current.append(char)
+        units += char_units
+    if current:
+        fragments.append("".join(current))
+    return fragments
+
+
 def sanitize_blocks_for_notion(blocks: List[Dict]) -> List[Dict]:
     """清理 blocks 中的无效链接并满足 Notion rich_text 限制"""
     sanitized = []
@@ -1209,15 +1227,15 @@ def sanitize_blocks_for_notion(blocks: List[Dict]) -> List[Dict]:
                         else:
                             text_payload = dict(text_payload)
                             text_payload.pop("link", None)
-                    if len(content) > 2000:
+                    if len(content.encode("utf-16-le")) // 2 > 2000:
                         # Translation can append text to an already parsed
                         # segment. Notion rejects any single rich_text content
                         # over 2000 chars, so split while retaining annotations
                         # and link metadata on each fragment.
-                        for offset in range(0, len(content), 2000):
+                        for fragment_content in _split_notion_text(content):
                             fragment = dict(rt)
                             fragment["text"] = dict(text_payload)
-                            fragment["text"]["content"] = content[offset:offset + 2000]
+                            fragment["text"]["content"] = fragment_content
                             cleaned_rich_text.append(fragment)
                         continue
                     rt = dict(rt)
