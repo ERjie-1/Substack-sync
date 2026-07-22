@@ -30,7 +30,7 @@ import hashlib
 import time
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Set, Tuple
 from email.utils import parsedate_to_datetime
 
 import requests
