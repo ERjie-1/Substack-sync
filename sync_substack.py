@@ -943,14 +943,23 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 
-def get_emails(service, query: str, max_results: int = 50) -> List[Dict]:
+def get_emails(
+    service,
+    query: str,
+    max_results: int = 50,
+    message_ids: Optional[Set[str]] = None,
+) -> List[Dict]:
     """获取邮件列表"""
     emails = []
-    results = service.users().messages().list(
-        userId='me', q=query, maxResults=max_results
-    ).execute()
-
-    messages = results.get('messages', [])
+    if message_ids:
+        # Bounded recovery must fetch the requested messages directly; a
+        # latest-N list window can omit older known IDs and falsely fail closed.
+        messages = [{'id': message_id} for message_id in sorted(message_ids)]
+    else:
+        results = service.users().messages().list(
+            userId='me', q=query, maxResults=max_results
+        ).execute()
+        messages = results.get('messages', [])
 
     for msg in messages:
         message = service.users().messages().get(
@@ -1511,7 +1520,12 @@ def sync_gmail_to_notion():
     # 获取邮件
     try:
         gmail_service = get_gmail_service()
-        emails = get_emails(gmail_service, gmail_query, max_results=max_results)
+        emails = get_emails(
+            gmail_service,
+            gmail_query,
+            max_results=max_results,
+            message_ids=SYNC_MESSAGE_IDS or None,
+        )
         if SYNC_MESSAGE_IDS:
             fetched_ids = {email.get("id", "") for email in emails}
             missing_ids = sorted(SYNC_MESSAGE_IDS - fetched_ids)
