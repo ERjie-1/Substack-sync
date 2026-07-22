@@ -1146,7 +1146,7 @@ class NotionAPI:
 
 
 def sanitize_blocks_for_notion(blocks: List[Dict]) -> List[Dict]:
-    """清理 blocks 中的无效链接"""
+    """清理 blocks 中的无效链接并满足 Notion rich_text 限制"""
     sanitized = []
 
     for block in blocks:
@@ -1165,13 +1165,30 @@ def sanitize_blocks_for_notion(blocks: List[Dict]) -> List[Dict]:
 
             for rt in rich_text:
                 if rt.get("type") == "text":
-                    if "link" in rt.get("text", {}):
-                        link_url = rt["text"]["link"].get("url", "")
+                    text_payload = rt.get("text", {})
+                    content = text_payload.get("content", "")
+                    if "link" in text_payload:
+                        link_url = text_payload["link"].get("url", "")
                         validated = validate_and_fix_url(link_url)
                         if validated:
-                            rt["text"]["link"]["url"] = validated
+                            text_payload = dict(text_payload)
+                            text_payload["link"] = {"url": validated}
                         else:
-                            del rt["text"]["link"]
+                            text_payload = dict(text_payload)
+                            text_payload.pop("link", None)
+                    if len(content) > 2000:
+                        # Translation can append text to an already parsed
+                        # segment. Notion rejects any single rich_text content
+                        # over 2000 chars, so split while retaining annotations
+                        # and link metadata on each fragment.
+                        for offset in range(0, len(content), 2000):
+                            fragment = dict(rt)
+                            fragment["text"] = dict(text_payload)
+                            fragment["text"]["content"] = content[offset:offset + 2000]
+                            cleaned_rich_text.append(fragment)
+                        continue
+                    rt = dict(rt)
+                    rt["text"] = text_payload
                     cleaned_rich_text.append(rt)
                 else:
                     cleaned_rich_text.append(rt)
