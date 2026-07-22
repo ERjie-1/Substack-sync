@@ -1332,7 +1332,7 @@ def sync_gmail_to_notion():
         "status": "RUNNING",
         "max_email_limit": max_results,
         "lookback_days": lookback_days,
-        "idempotency_mode": "gmail_message_id_property" if NOTION_GMAIL_MESSAGE_ID_PROPERTY else "in_run_gmail_id_plus_legacy_keys",
+        "idempotency_mode": "gmail_message_id_property" if NOTION_GMAIL_MESSAGE_ID_PROPERTY else "legacy_url_title_date_plus_in_run_gmail_id",
         "message_id_property": NOTION_GMAIL_MESSAGE_ID_PROPERTY or None,
         "ledger_path": str(SYNC_LEDGER_PATH),
         "status_side_effects_disabled": DISABLE_STATUS_SIDE_EFFECTS,
@@ -1358,15 +1358,9 @@ def sync_gmail_to_notion():
         print(f"[SETUP_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
         raise SystemExit(1)
 
-    # GitHub-hosted runners are ephemeral: a local ledger cannot provide
-    # cross-run idempotency. Production therefore requires a durable Notion
-    # message-id property; the ledger remains useful for same-run/test and
-    # partial-page recovery evidence.
-    if not DISABLE_STATUS_SIDE_EFFECTS and not NOTION_GMAIL_MESSAGE_ID_PROPERTY:
-        fail_closed(
-            "idempotency_config",
-            RuntimeError("production requires NOTION_GMAIL_MESSAGE_ID_PROPERTY; ephemeral ledger is not cross-run durable"),
-        )
+    # The durable Gmail message-id property is optional. When absent, retain
+    # the existing URL/title-date deduplication and record that mode explicitly
+    # in the receipt; the local ledger still covers same-run/partial recovery.
 
     # 初始化 Notion API
     notion = NotionAPI(NOTION_API_TOKEN)
