@@ -69,6 +69,10 @@ on:
         description: 'Optional explicit DB1 id for an owner-authorized test run'
         required: false
         default: ''
+      source_filter:
+        description: 'Optional exact downstream DB1 发件人 filter for bounded archive runs'
+        required: false
+        default: ''
 
 concurrency:
   group: sync-${{ github.event_name == 'schedule' && 'prod' || github.event.inputs.environment || 'prod' }}
@@ -137,7 +141,7 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: token $DISPATCH_TOKEN" \
               https://api.github.com/repos/ERjie-1/Articles-process-and-upload-to-Notion/dispatches \
-              -d '{"event_type":"notion_new_article","client_payload":{"source":"substack","source_repo":"substack-sync","emitted_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}}')
+              -d '{"event_type":"notion_new_article","client_payload":{"source":"substack","source_repo":"substack-sync","emitted_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","source_filter":"'"${{ github.event.inputs.source_filter || '' }}"'","title_prefix_filter":"'"${{ github.event.inputs.title_prefix || '' }}"'","download_limit":"'"${{ github.event.inputs.max_emails || '' }}"'"}}')
             if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
               echo "Dispatch sent to article-inbox-processor (HTTP $HTTP_CODE)"
             else
