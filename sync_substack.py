@@ -57,6 +57,8 @@ MIN_TITLE_LENGTH = 5
 DEFAULT_SYNC_LOOKBACK_DAYS = 21
 DEFAULT_NOTION_TIMEOUT_SECONDS = 30
 NOTION_TITLE_PREFIX = os.environ.get("NOTION_TITLE_PREFIX", "").strip()
+RENAME_NOTION_PAGE_ID = os.environ.get("RENAME_NOTION_PAGE_ID", "").strip()
+RENAME_NOTION_TITLE = os.environ.get("RENAME_NOTION_TITLE", "").strip()
 SYNC_RECEIPT_DIR = Path(os.environ.get("SYNC_RECEIPT_DIR", "sync_receipts"))
 SYNC_LEDGER_PATH = Path(os.environ.get("SYNC_LEDGER_PATH", str(SYNC_RECEIPT_DIR / "message_ledger.json")))
 NOTION_GMAIL_MESSAGE_ID_PROPERTY = os.environ.get("NOTION_GMAIL_MESSAGE_ID_PROPERTY", "").strip()
@@ -1457,6 +1459,21 @@ def sync_gmail_to_notion():
     # 初始化 Notion API
     notion = NotionAPI(NOTION_API_TOKEN)
     notion2 = NotionAPI(NOTION_API_TOKEN_2) if NOTION_API_TOKEN_2 and NOTION_DATABASE_ID_2 else None
+    if bool(RENAME_NOTION_PAGE_ID) != bool(RENAME_NOTION_TITLE):
+        fail_closed("notion_rename_setup", RuntimeError("RENAME_NOTION_PAGE_ID and RENAME_NOTION_TITLE must be provided together"))
+    if RENAME_NOTION_PAGE_ID:
+        try:
+            notion.update_page(RENAME_NOTION_PAGE_ID, {
+                "Name": {"title": [{"type": "text", "text": {"content": RENAME_NOTION_TITLE[:200]}}]}
+            })
+            receipt["rename_result"] = {
+                "status": "PASS",
+                "page_id": RENAME_NOTION_PAGE_ID,
+                "title": RENAME_NOTION_TITLE[:200],
+            }
+            print(f"[NOTION_RENAME] page_id={RENAME_NOTION_PAGE_ID} status=PASS")
+        except Exception as exc:
+            fail_closed("notion_rename", exc)
     if notion2:
         print("DB2: Enabled")
     else:

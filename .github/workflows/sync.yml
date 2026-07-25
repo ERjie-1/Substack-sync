@@ -73,6 +73,14 @@ on:
         description: 'Optional exact downstream DB1 发件人 filter for bounded archive runs'
         required: false
         default: ''
+      rename_page_id:
+        description: 'Optional existing Notion page id to rename before a bounded backfill'
+        required: false
+        default: ''
+      rename_title:
+        description: 'Optional normal title paired with rename_page_id'
+        required: false
+        default: ''
 
 concurrency:
   group: sync-${{ github.event_name == 'schedule' && 'prod' || github.event.inputs.environment || 'prod' }}
@@ -107,7 +115,7 @@ jobs:
           GMAIL_TOKEN_BASE64: ${{ secrets.GMAIL_TOKEN_BASE64 }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ENABLE_TRANSLATION: 'true'
-          DISABLE_STATUS_SIDE_EFFECTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'test' && 'true' || 'false' }}
+          DISABLE_STATUS_SIDE_EFFECTS: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.environment == 'test' || github.event.inputs.sender_email != '' || github.event.inputs.message_ids != '') && 'true' || 'false' }}
           NOTION_GMAIL_MESSAGE_ID_PROPERTY: ${{ vars.NOTION_GMAIL_MESSAGE_ID_PROPERTY }}
           SYNC_RECEIPT_DIR: ./sync_receipts
           SYNC_MESSAGE_IDS: ${{ github.event.inputs.message_ids || '' }}
@@ -115,6 +123,8 @@ jobs:
           SYNC_SENDER_EMAIL: ${{ github.event.inputs.sender_email || '' }}
           SYNC_LOOKBACK_DAYS: ${{ github.event.inputs.sync_lookback_days || '21' }}
           NOTION_TITLE_PREFIX: ${{ github.event.inputs.title_prefix || '' }}
+          RENAME_NOTION_PAGE_ID: ${{ github.event.inputs.rename_page_id || '' }}
+          RENAME_NOTION_TITLE: ${{ github.event.inputs.rename_title || '' }}
         run: |
           export GMAIL_TOKEN="$(echo "$GMAIL_TOKEN_BASE64" | base64 --decode)"
           OUTPUT=$(python sync_substack.py 2>&1) || { echo "$OUTPUT"; exit 1; }
