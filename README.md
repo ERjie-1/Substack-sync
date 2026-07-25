@@ -34,3 +34,26 @@ base64 -i gmail_token_for_github.json | tr -d '\n'
 ```
 
 Paste the output into the `GMAIL_TOKEN_BASE64` secret.
+
+## Bounded recovery runbook
+
+Use only after the test gate and explicit owner authorization. In the Actions
+manual dispatch, select `environment=test`, set `max_emails=1`, provide an
+exact `sender_email`, set `sync_lookback_days` as required, and provide an
+explicit comma-separated `message_ids` candidate list when available. Do not
+use a production schedule for recovery. When `sender_email` is set, both the
+Gmail query and per-message processing enforce the exact normalized address.
+
+- If DB1 has a persisted `page_id` with `page_created`, `partial_page_created`,
+  or `appending`, resume by appending only the missing blocks from the saved
+  offset; never create another DB1 page.
+- If DB1 is `synced` and DB2 is `pending`, a crash-safe recovery run enters the
+  DB2-only path. If DB1 recovery discovers DB2 still pending, it records
+  `db2_recovery_deferred`, changes DB2 to `failed`, exits nonzero, and requires
+  a second bounded run.
+- DB2-only recovery uses `db2_page_id` and `db2_blocks_appended` to append only
+  missing blocks. It must not recreate either page or process an unbounded
+  Gmail window.
+- A production run requires the durable Notion Gmail message-id property via
+  `NOTION_GMAIL_MESSAGE_ID_PROPERTY`; the local ledger is not cross-run durable
+  on GitHub-hosted runners.

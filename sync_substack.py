@@ -56,9 +56,11 @@ MIN_TEXT_LENGTH = 20
 MIN_TITLE_LENGTH = 5
 DEFAULT_SYNC_LOOKBACK_DAYS = 21
 DEFAULT_NOTION_TIMEOUT_SECONDS = 30
+NOTION_TITLE_PREFIX = os.environ.get("NOTION_TITLE_PREFIX", "").strip()
 SYNC_RECEIPT_DIR = Path(os.environ.get("SYNC_RECEIPT_DIR", "sync_receipts"))
 SYNC_LEDGER_PATH = Path(os.environ.get("SYNC_LEDGER_PATH", str(SYNC_RECEIPT_DIR / "message_ledger.json")))
 NOTION_GMAIL_MESSAGE_ID_PROPERTY = os.environ.get("NOTION_GMAIL_MESSAGE_ID_PROPERTY", "").strip()
+SYNC_SENDER_EMAIL = os.environ.get("SYNC_SENDER_EMAIL", "").strip().lower()
 SYNC_MESSAGE_IDS = {
     value.strip() for value in os.environ.get("SYNC_MESSAGE_IDS", "").split(",") if value.strip()
 }
@@ -154,7 +156,8 @@ GMAIL_QUERY = '''from:(
     swyx@substack.com OR
     swyx+ainews@substack.com OR
     streetsignal@substack.com OR
-    alphaseeker84@substack.com
+    alphaseeker84@substack.com OR
+    benjaminusagi267@substack.com
 ) -"sign in to substack" -"upgrade to a paid subscription" -"your payment receipt from"'''
 
 # 发件人显示名称映射
@@ -179,7 +182,11 @@ SOURCE_MAPPING = {
     'swyx+ainews@substack.com': 'LatentSpace',
     'streetsignal@substack.com': 'streetsignal',
     'alphaseeker84@substack.com': 'Elliot',
+    'benjaminusagi267@substack.com': '本杰明',
 }
+
+# Sources intentionally archived to the primary Notion database only.
+DB2_EXCLUDED_SOURCES = {"Robs", "LatentSpace", "本杰明"}
 
 # ============ 股票 Ticker 列表 ============
 STOCK_TICKERS = {
@@ -1006,6 +1013,11 @@ def get_emails(
     return emails
 
 
+def normalized_sender_email(header_value: str) -> str:
+    match = re.search(r'<([^>]+)>', header_value or "")
+    return (match.group(1) if match else (header_value or "")).strip().lower()
+
+
 def get_email_body(payload: Dict) -> Tuple[str, str]:
     """提取邮件正文"""
     text_body = ""
@@ -1390,7 +1402,8 @@ def sync_gmail_to_notion():
 
     max_results = int(os.environ.get("MAX_EMAIL_LIMIT", "50"))
     lookback_days = get_sync_lookback_days()
-    gmail_query = f"{GMAIL_QUERY} newer_than:{lookback_days}d"
+    sender_query = f"from:{SYNC_SENDER_EMAIL} " if SYNC_SENDER_EMAIL else ""
+    gmail_query = f"{sender_query}{GMAIL_QUERY} newer_than:{lookback_days}d"
     print(f"Max emails to fetch: {max_results}")
     print(f"Sync lookback days: {lookback_days}")
 
@@ -1408,6 +1421,7 @@ def sync_gmail_to_notion():
         "db2_failures": [],
         "message_results": [],
         "requested_message_ids": sorted(SYNC_MESSAGE_IDS),
+        "sender_filter": SYNC_SENDER_EMAIL or None,
     }
 
     def record_message_result(email: Dict, **fields):
@@ -1606,6 +1620,10 @@ def sync_gmail_to_notion():
             processed_count += 1
             subject = email['subject']
             sender = email['from']
+            if SYNC_SENDER_EMAIL and normalized_sender_email(sender) != SYNC_SENDER_EMAIL:
+                record_message_result(email, result="skipped_sender_mismatch")
+                skipped_count += 1
+                continue
             body_html = email['body_html']
             body_text = email['body_text']
             sender_tag = extract_sender_tag(sender)
@@ -1732,8 +1750,9 @@ def sync_gmail_to_notion():
             tickers = extract_tickers(subject, body_html if body_html else "", sender_tag)
 
             # 构建基础属性
+            notion_title = f"{NOTION_TITLE_PREFIX}{subject}" if NOTION_TITLE_PREFIX else subject
             properties = {
-                "Name": {"title": [{"type": "text", "text": {"content": subject[:200]}}]},
+                "Name": {"title": [{"type": "text", "text": {"content": notion_title[:200]}}]},
                 "Date": {"date": {"start": date_str}},
                 "发件人": {"select": {"name": sender_tag[:100]}},
                 "类型": {"select": {"name": email_type}},
@@ -1760,7 +1779,7 @@ def sync_gmail_to_notion():
             # 清理无效链接
             content_blocks = sanitize_blocks_for_notion(content_blocks)
 
-            db2_applicable = bool(notion2 and sender_tag not in ("Robs", "LatentSpace"))
+            db2_applicable = bool(notion2 and sender_tag not in DB2_EXCLUDED_SOURCES)
             bounded_page_complete = False
 
             # A bounded URL lookup must prove the page is incomplete before
@@ -2013,7 +2032,7 @@ def sync_gmail_to_notion():
                 write_message_ledger(message_ledger)
 
                 # 同步到数据库2 (Robs 仅同步到 DB1)
-                if notion2 and sender_tag not in ("Robs", "LatentSpace"):
+                if notion2 and sender_tag not in DB2_EXCLUDED_SOURCES:
                     try:
                         def persist_db2_progress(page_id, blocks_appended, total_blocks):
                             message_ledger[gmail_message_id].update({

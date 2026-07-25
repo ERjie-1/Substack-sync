@@ -53,6 +53,22 @@ on:
         description: 'Optional comma-separated Gmail message IDs for bounded recovery'
         required: false
         default: ''
+      sender_email:
+        description: 'Optional exact sender email filter for bounded test runs'
+        required: false
+        default: ''
+      sync_lookback_days:
+        description: 'Optional lookback window in days for bounded test/backfill runs'
+        required: false
+        default: '21'
+      title_prefix:
+        description: 'Optional Notion title prefix for isolated test pages'
+        required: false
+        default: ''
+      notion_database_id:
+        description: 'Optional explicit DB1 id for an owner-authorized test run'
+        required: false
+        default: ''
 
 concurrency:
   group: sync-${{ github.event_name == 'schedule' && 'prod' || github.event.inputs.environment || 'prod' }}
@@ -81,7 +97,7 @@ jobs:
         id: sync
         env:
           NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_DATABASE_ID: ${{ github.event.inputs.notion_database_id || secrets.NOTION_DATABASE_ID }}
           NOTION_API_TOKEN_2: ${{ secrets.NOTION_API_TOKEN_2 }}
           NOTION_DATABASE_ID_2: ${{ secrets.NOTION_DATABASE_ID_2 }}
           GMAIL_TOKEN_BASE64: ${{ secrets.GMAIL_TOKEN_BASE64 }}
@@ -92,6 +108,9 @@ jobs:
           SYNC_RECEIPT_DIR: ./sync_receipts
           SYNC_MESSAGE_IDS: ${{ github.event.inputs.message_ids || '' }}
           MAX_EMAIL_LIMIT: ${{ github.event.inputs.max_emails || '50' }}
+          SYNC_SENDER_EMAIL: ${{ github.event.inputs.sender_email || '' }}
+          SYNC_LOOKBACK_DAYS: ${{ github.event.inputs.sync_lookback_days || '21' }}
+          NOTION_TITLE_PREFIX: ${{ github.event.inputs.title_prefix || '' }}
         run: |
           export GMAIL_TOKEN="$(echo "$GMAIL_TOKEN_BASE64" | base64 --decode)"
           OUTPUT=$(python sync_substack.py 2>&1) || { echo "$OUTPUT"; exit 1; }
