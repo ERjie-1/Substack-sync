@@ -54,6 +54,6 @@ Gmail query and per-message processing enforce the exact normalized address.
 - DB2-only recovery uses `db2_page_id` and `db2_blocks_appended` to append only
   missing blocks. It must not recreate either page or process an unbounded
   Gmail window.
-- A production run requires the durable Notion Gmail message-id property via
-  `NOTION_GMAIL_MESSAGE_ID_PROPERTY`; the local ledger is not cross-run durable
-  on GitHub-hosted runners.
+- The durable Notion Gmail message-id property is optional in the current
+  production workflow; when it is configured, it strengthens cross-run
+  idempotency. The local ledger remains run-local on GitHub-hosted runners.

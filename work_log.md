@@ -55,7 +55,7 @@ sync_substack.py
 - 修改文件: `sync_substack.py`、`work_log.md`
 - 行为影响: 新 sender 加入 Gmail allowlist，映射为 `本杰明`；复用既有 URL/Gmail ledger/标题日期去重；`本杰明` 加入 source-specific DB2 排除集合；可用 `NOTION_TITLE_PREFIX=[测试]-` 做隔离测试标题；manual dispatch 可用 `sender_email` 精确过滤并用 `sync_lookback_days` 控制历史窗口。
 - 归档边界: OneDrive 由下游 `Articles-process-and-upload-to-Notion` 的 Graph API 归档映射处理，不由本 repo 直接写本机路径；下游映射为 `newsletter/本杰明`。
-- 验证/部署: 当前仅本地修改，未触碰真实 Notion、OneDrive 或 GitHub Actions；需先完成 Jay review、6 月 1 日起历史回填 dry-run 和 `[测试]-` 验证，再决定 push/启用。
+- 验证/部署: `py_compile`、sender/DB2/title-prefix smoke PASS；`7db19aa` 已进入 `main`。受控 main test run `30161575977` 在 Gmail OAuth `invalid_grant` 处失败，未触碰真实 Notion/OneDrive 页面；下游 OneDrive 映射需由 Articles-process 独立提交后再做闭环验证。
 
 ### 2026-05-27 - 新增 streetsignal / alphaseeker84 订阅源 (Phase 3C task #83)
 - 变更类型: 新功能
