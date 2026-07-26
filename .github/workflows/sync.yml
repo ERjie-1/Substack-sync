@@ -81,6 +81,10 @@ on:
         description: 'Optional normal title paired with rename_page_id'
         required: false
         default: ''
+      translation_diagnostic_only:
+        description: 'Only call translation and write receipt; never write Notion or dispatch downstream'
+        required: false
+        default: 'false'
 
 concurrency:
   group: sync-${{ github.event_name == 'schedule' && 'prod' || github.event.inputs.environment || 'prod' }}
@@ -125,6 +129,7 @@ jobs:
           NOTION_TITLE_PREFIX: ${{ github.event.inputs.title_prefix || '' }}
           RENAME_NOTION_PAGE_ID: ${{ github.event.inputs.rename_page_id || '' }}
           RENAME_NOTION_TITLE: ${{ github.event.inputs.rename_title || '' }}
+          TRANSLATION_DIAGNOSTIC_ONLY: ${{ github.event.inputs.translation_diagnostic_only || 'false' }}
         run: |
           export GMAIL_TOKEN="$(echo "$GMAIL_TOKEN_BASE64" | base64 --decode)"
           OUTPUT=$(python sync_substack.py 2>&1) || { echo "$OUTPUT"; exit 1; }
@@ -142,7 +147,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Dispatch to article processor
-        if: success() && steps.sync.outputs.new_articles != '0'
+        if: success() && steps.sync.outputs.new_articles != '0' && (github.event_name != 'workflow_dispatch' || github.event.inputs.translation_diagnostic_only != 'true')
         env:
           DISPATCH_TOKEN: ${{ secrets.CROSS_REPO_DISPATCH_TOKEN }}
         run: |

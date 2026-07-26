@@ -66,12 +66,14 @@ SYNC_SENDER_EMAIL = os.environ.get("SYNC_SENDER_EMAIL", "").strip().lower()
 SYNC_MESSAGE_IDS = {
     value.strip() for value in os.environ.get("SYNC_MESSAGE_IDS", "").split(",") if value.strip()
 }
+TRANSLATION_DIAGNOSTIC_ONLY = os.environ.get("TRANSLATION_DIAGNOSTIC_ONLY", "false").lower() == "true"
 # Bounded recovery must not mutate unrelated recent pages (for example, empty
 # status refresh). Keep the explicit env override for test/manual callers, but
 # make the narrow message-id mode fail closed by default.
 DISABLE_STATUS_SIDE_EFFECTS = (
     os.environ.get("DISABLE_STATUS_SIDE_EFFECTS", "false").lower() == "true"
     or bool(SYNC_MESSAGE_IDS)
+    or TRANSLATION_DIAGNOSTIC_ONLY
 )
 
 # 翻译开关
@@ -107,6 +109,14 @@ class NotionWriteError(Exception):
         self.blocks_appended = blocks_appended
         self.total_blocks = total_blocks
         super().__init__(f"Notion write failed in {phase}: {cause}")
+
+
+class TranslationError(Exception):
+    """DeepSeek translation failure with body-free diagnostics."""
+
+    def __init__(self, message: str, diagnostics: Optional[Dict] = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
 
 
 def _sha256_json(value) -> str:
@@ -522,12 +532,48 @@ def should_translate_block(block: Dict) -> Tuple[bool, str]:
     return True, "ok"
 
 
+def _deepseek_batch_diagnostics(texts: List[str], marked_input: str) -> Dict:
+    lengths = [len(text) for text in texts]
+    return {
+        "provider": "deepseek",
+        "model": DEEPSEEK_MODEL,
+        "batch_size": len(texts),
+        "batch_chars": sum(lengths),
+        "batch_max_chars": max(lengths) if lengths else 0,
+        "request_text_sha256": hashlib.sha256(marked_input.encode("utf-8", errors="ignore")).hexdigest(),
+    }
+
+
+def _safe_deepseek_error(response) -> Dict:
+    diagnostics = {
+        "http_status": response.status_code,
+        "response_body_sha256": hashlib.sha256(response.text.encode("utf-8", errors="ignore")).hexdigest(),
+    }
+    try:
+        payload = response.json()
+    except ValueError:
+        return diagnostics
+    error_payload = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error_payload, dict):
+        code = error_payload.get("code")
+        message = error_payload.get("message")
+        error_type = error_payload.get("type")
+        if code:
+            diagnostics["deepseek_error_code"] = str(code)[:120]
+        if message:
+            diagnostics["deepseek_error_message"] = str(message)[:500]
+        if error_type:
+            diagnostics["deepseek_error_type"] = str(error_type)[:120]
+    return diagnostics
+
+
 def call_deepseek_api(texts: List[str], timeout: int = 60) -> Optional[str]:
     """调用 DeepSeek API"""
     if not DEEPSEEK_API_KEY:
         return None
 
     marked_input = "\n".join([f"[P{i+1}] {t}" for i, t in enumerate(texts)])
+    diagnostics = _deepseek_batch_diagnostics(texts, marked_input)
 
     try:
         response = requests.post(
@@ -550,17 +596,31 @@ def call_deepseek_api(texts: List[str], timeout: int = 60) -> Optional[str]:
         )
 
         if response.status_code != 200:
-            print(f"    DeepSeek error: {response.status_code}")
-            return None
+            diagnostics.update(_safe_deepseek_error(response))
+            print(f"    DeepSeek error: {json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)}")
+            raise TranslationError("DeepSeek translation request failed", diagnostics)
 
-        return response.json()["choices"][0]["message"]["content"]
+        try:
+            return response.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            diagnostics["http_status"] = response.status_code
+            diagnostics["response_body_sha256"] = hashlib.sha256(
+                response.text.encode("utf-8", errors="ignore")
+            ).hexdigest()
+            print(f"    DeepSeek malformed response: {json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)}")
+            raise TranslationError("DeepSeek translation response malformed", diagnostics) from exc
 
     except requests.exceptions.Timeout:
-        print(f"    DeepSeek timeout")
-        return None
+        diagnostics["error_type"] = "Timeout"
+        print(f"    DeepSeek timeout: {json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)}")
+        raise TranslationError("DeepSeek translation request timed out", diagnostics)
+    except TranslationError:
+        raise
     except Exception as e:
-        print(f"    DeepSeek exception: {e}")
-        return None
+        diagnostics["error_type"] = type(e).__name__
+        diagnostics["error"] = str(e)[:500]
+        print(f"    DeepSeek exception: {json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)}")
+        raise TranslationError("DeepSeek translation request raised exception", diagnostics) from e
 
 
 def parse_translation_response(response: str, count: int) -> List[Optional[str]]:
@@ -604,6 +664,15 @@ def translate_blocks_deepseek(blocks: List[Dict]) -> List[Dict]:
     if not texts_to_translate:
         return blocks
 
+    if not DEEPSEEK_API_KEY:
+        raise TranslationError("DeepSeek API key missing", {
+            "provider": "deepseek",
+            "model": DEEPSEEK_MODEL,
+            "batch_size": len(texts_to_translate),
+            "batch_chars": sum(len(text) for text in texts_to_translate),
+            "error_code": "missing_api_key",
+        })
+
     print(f"    Translating {len(texts_to_translate)} blocks...")
 
     # 分批翻译
@@ -623,6 +692,23 @@ def translate_blocks_deepseek(blocks: List[Dict]) -> List[Dict]:
             if DEEPSEEK_API_KEY:
                 deepseek_response = call_deepseek_api(batch)
                 batch_translations = parse_translation_response(deepseek_response, len(batch))
+                if any(trans is None for trans in batch_translations):
+                    diagnostics = {
+                        "provider": "deepseek",
+                        "model": DEEPSEEK_MODEL,
+                        "batch_size": len(batch),
+                        "batch_chars": sum(len(item) for item in batch),
+                        "translated_count": sum(1 for trans in batch_translations if trans),
+                        "expected_count": len(batch),
+                        "response_text_sha256": hashlib.sha256(
+                            (deepseek_response or "").encode("utf-8", errors="ignore")
+                        ).hexdigest(),
+                    }
+                    print(
+                        "    DeepSeek incomplete translation: "
+                        f"{json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)}"
+                    )
+                    raise TranslationError("DeepSeek translation response incomplete", diagnostics)
 
                 for j, trans in enumerate(batch_translations):
                     translations[batch_start + j] = trans
@@ -1391,6 +1477,8 @@ def failure_record(email: Dict, *, phase: str, error: Exception, page_id: str = 
             "notion_message": error.notion_message,
             "payload_sha256": error.payload_sha256,
         })
+    if isinstance(error, TranslationError):
+        record["translation_diagnostics"] = error.diagnostics
     return record
 
 
@@ -1419,6 +1507,8 @@ def sync_gmail_to_notion():
         "message_id_property": NOTION_GMAIL_MESSAGE_ID_PROPERTY or None,
         "ledger_path": str(SYNC_LEDGER_PATH),
         "status_side_effects_disabled": DISABLE_STATUS_SIDE_EFFECTS,
+        "translation_diagnostic_only": TRANSLATION_DIAGNOSTIC_ONLY,
+        "translation_diagnostic_results": [],
         "failures": [],
         "db2_failures": [],
         "message_results": [],
@@ -1458,6 +1548,12 @@ def sync_gmail_to_notion():
 
     # 初始化 Notion API
     notion = NotionAPI(NOTION_API_TOKEN)
+
+    if TRANSLATION_DIAGNOSTIC_ONLY and (RENAME_NOTION_PAGE_ID or RENAME_NOTION_TITLE):
+        fail_closed(
+            "translation_diagnostic_config",
+            RuntimeError("translation diagnostic mode does not allow Notion rename inputs"),
+        )
     notion2 = NotionAPI(NOTION_API_TOKEN_2) if NOTION_API_TOKEN_2 and NOTION_DATABASE_ID_2 else None
     if bool(RENAME_NOTION_PAGE_ID) != bool(RENAME_NOTION_TITLE):
         fail_closed("notion_rename_setup", RuntimeError("RENAME_NOTION_PAGE_ID and RENAME_NOTION_TITLE must be provided together"))
@@ -1631,6 +1727,7 @@ def sync_gmail_to_notion():
     synced_count = 0
     processed_count = 0
     skipped_count = 0
+    diagnosed_count = 0
 
     for email in emails:
         try:
@@ -1670,6 +1767,35 @@ def sync_gmail_to_notion():
             article_url = extract_article_url(body_text) or extract_article_url(body_html)
             article_url_norm = normalize_url(article_url) if article_url else ""
             validated_url = validate_and_fix_url(article_url) if article_url else None
+
+            if TRANSLATION_DIAGNOSTIC_ONLY:
+                content_blocks = html_to_notion_blocks(body_html) if body_html else []
+                if ENABLE_TRANSLATION and content_blocks:
+                    try:
+                        translated_blocks = translate_blocks_deepseek(content_blocks)
+                    except TranslationError as exc:
+                        record = failure_record(email, phase="translate_blocks", error=exc)
+                        receipt["failures"].append(record)
+                        print(f"[TRANSLATION_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
+                        continue
+                    receipt["translation_diagnostic_results"].append({
+                        "gmail_message_id": gmail_message_id,
+                        **_safe_subject(subject),
+                        "result": "translation_ok_no_write",
+                        "content_block_count": len(translated_blocks),
+                    })
+                    print(f"[TRANSLATION_DIAGNOSTIC_OK] gmail_message_id={gmail_message_id}")
+                    diagnosed_count += 1
+                    continue
+                receipt["translation_diagnostic_results"].append({
+                    "gmail_message_id": gmail_message_id,
+                    **_safe_subject(subject),
+                    "result": "no_translatable_content",
+                    "content_block_count": len(content_blocks),
+                })
+                print(f"[TRANSLATION_DIAGNOSTIC_SKIP] gmail_message_id={gmail_message_id}")
+                diagnosed_count += 1
+                continue
 
             # A bounded recovery run is allowed to reuse an already-created
             # partial page found by its stable URL. Normal runs retain the
@@ -1761,7 +1887,13 @@ def sync_gmail_to_notion():
 
             # 翻译
             if ENABLE_TRANSLATION and content_blocks:
-                content_blocks = translate_blocks_deepseek(content_blocks)
+                try:
+                    content_blocks = translate_blocks_deepseek(content_blocks)
+                except TranslationError as exc:
+                    record = failure_record(email, phase="translate_blocks", error=exc)
+                    receipt["failures"].append(record)
+                    print(f"[TRANSLATION_FAILED] {json.dumps(record, ensure_ascii=False, sort_keys=True)}")
+                    continue
 
             # 提取 Ticker
             tickers = extract_tickers(subject, body_html if body_html else "", sender_tag)
@@ -2106,6 +2238,7 @@ def sync_gmail_to_notion():
         "fetched_count": len(emails),
         "processed_count": processed_count,
         "synced_count": synced_count,
+        "diagnosed_count": diagnosed_count,
         "skipped_count": skipped_count,
         "failure_count": len(receipt["failures"]),
         "db2_failure_count": len(receipt["db2_failures"]),
@@ -2115,7 +2248,10 @@ def sync_gmail_to_notion():
             "url_guard_fail_closed": url_guard_fail_closed,
         },
     })
-    write_message_ledger(message_ledger)
+    if TRANSLATION_DIAGNOSTIC_ONLY:
+        print("[LEDGER] skipped write in translation diagnostic mode")
+    else:
+        write_message_ledger(message_ledger)
     write_sync_receipt(receipt)
     print(f"=" * 60)
     print(f"Sync completed! Added {synced_count} new articles")
