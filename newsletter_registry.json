@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "generated_at": "2026-08-10T00:00:00Z",
-  "registry_sha": "798ca4b4a9abce56e15a3f6635a765edd667c94da4beda784612fe33ad7db676",
+  "registry_sha": "191556090b5112fb0c2a0b77c39ebd3507bd82e76dd70c20d033c111033561ff",
   "sources": [
     {
       "source_id": "citrini",
@@ -15,7 +15,8 @@
       "episode_key": null,
       "adapter_type": "substack",
       "activation": "off",
-      "routes": {"daily": "include", "weekly": "exclude", "newsflow": "exclude", "archive": "include", "rag": "include"}
+      "routes": {"daily": "include", "weekly": "conditional", "newsflow": "exclude", "archive": "include", "rag": "include"},
+      "article_type_routes": {"weekly": {"substantive": "include", "preview_or_empty": "hold"}}
     },
     {
       "source_id": "capitalflow",
