@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-10T00:00:00Z",
+  "registry_sha": "eb2f5e0f6d1f58232cd99dc96e4b9b6dcada2f7976f4f13df39caf84368fbe85",
+  "sources": [
+    {
+      "source_id": "citrini",
+      "display_name": "Citrini",
+      "aliases": ["Citrini"],
+      "senders": ["citrini@substack.com"],
+      "onedrive_root": "newsletter/Citrini",
+      "prohibited_parent_roots": ["newsletter"],
+      "completeness_policy": "substantive_body_required",
+      "identity_policy": "gmail_message_id_plus_body_sha",
+      "episode_key": null,
+      "adapter_type": "substack",
+      "activation": "off",
+      "routes": {"daily": "include", "weekly": "conditional", "newsflow": "exclude", "archive": "include", "rag": "include"},
+      "article_type_routes": {"weekly": {"annual_or_cycle_summary": "include", "ordinary": "hold", "preview_or_empty": "hold"}}
+    },
+    {
+      "source_id": "capitalflow",
+      "display_name": "Capitalflow",
+      "aliases": ["Capitalflow", "Capital Flows"],
+      "senders": ["capitalflows@substack.com"],
+      "onedrive_root": "newsletter/Capitalflow",
+      "prohibited_parent_roots": ["newsletter"],
+      "completeness_policy": "preview_or_empty_holds",
+      "identity_policy": "gmail_message_id_plus_body_sha",
+      "episode_key": null,
+      "adapter_type": "substack",
+      "activation": "off",
+      "routes": {"daily": "include", "weekly": "include", "newsflow": "pending", "archive": "include", "rag": "include"}
+    },
+    {
+      "source_id": "sleepy",
+      "display_name": "Sleepy",
+      "aliases": ["Sleepy", "SleepySol"],
+      "senders": ["sleepysol@substack.com"],
+      "onedrive_root": "newsletter/Sleepy",
+      "prohibited_parent_roots": ["newsletter"],
+      "completeness_policy": "substantive_body_required_optional_transcript",
+      "identity_policy": "gmail_message_id_plus_body_sha_episode_key",
+      "episode_key": "sleepy_episode",
+      "adapter_type": "substack",
+      "activation": "off",
+      "routes": {"daily": "include", "weekly": "exclude", "newsflow": "pending", "archive": "include", "rag": "include"}
+    }
+  ]
+}

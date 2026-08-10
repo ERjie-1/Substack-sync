@@ -85,13 +85,87 @@ on:
         description: 'Only call translation and write receipt; never write Notion or dispatch downstream'
         required: false
         default: 'false'
+      phase4_dry_run:
+        description: 'Bounded Phase 4 Gmail read-only path; must not write or dispatch'
+        required: false
+        default: false
+        type: boolean
+      phase4_manifest_id:
+        description: 'Frozen Phase 4 run manifest id'
+        required: false
+        default: ''
+      phase4_manifest_sha:
+        description: 'Frozen Phase 4 manifest SHA256'
+        required: false
+        default: ''
+      phase4_registry_sha:
+        description: 'Byte-identical registry SHA256'
+        required: false
+        default: 'eb2f5e0f6d1f58232cd99dc96e4b9b6dcada2f7976f4f13df39caf84368fbe85'
+      phase4_source_ids:
+        description: 'Exact bounded source ids'
+        required: false
+        default: 'citrini,capitalflow,sleepy'
+      phase4_max_emails:
+        description: 'Bounded Gmail read limit'
+        required: false
+        default: '50'
+      phase4_lookback_days:
+        description: 'Bounded Gmail lookback'
+        required: false
+        default: '21'
+      phase4_message_ids:
+        description: 'Optional bounded Gmail message ids'
+        required: false
+        default: ''
 
 concurrency:
   group: sync-${{ github.event_name == 'schedule' && 'prod' || github.event.inputs.environment || 'prod' }}
   cancel-in-progress: true
 
 jobs:
+  phase4-dry-run:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.phase4_dry_run == true }}
+    runs-on: ubuntu-latest
+    # Phase 4 remains read-only; use the already validated prod environment
+    # credential without enabling the production sync job below.
+    environment: prod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Read bounded Gmail and emit isolated receipt
+        env:
+          GMAIL_TOKEN_BASE64: ${{ secrets.GMAIL_TOKEN_BASE64 }}
+        run: |
+          test -n "$GMAIL_TOKEN_BASE64"
+          export GMAIL_TOKEN="$(printf '%s' "$GMAIL_TOKEN_BASE64" | base64 --decode)"
+          test -n "$GMAIL_TOKEN"
+          test -n "${{ inputs.phase4_manifest_id }}" && test -n "${{ inputs.phase4_manifest_sha }}"
+          PYTHONPATH=. python newsletter_dry_run.py \
+            --from-gmail \
+            --source-ids '${{ inputs.phase4_source_ids }}' \
+            --max-emails '${{ inputs.phase4_max_emails }}' \
+            --lookback-days '${{ inputs.phase4_lookback_days }}' \
+            --message-ids '${{ inputs.phase4_message_ids }}' \
+            --output "newsletter-phase4-substack-${{ github.run_id }}.json" \
+            --manifest-id '${{ inputs.phase4_manifest_id }}' \
+            --manifest-sha '${{ inputs.phase4_manifest_sha }}' \
+            --registry-sha '${{ inputs.phase4_registry_sha }}' \
+            --repo-sha "${{ github.sha }}"
+      - name: Upload isolated receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: newsletter-phase4-substack-${{ github.run_id }}
+          path: newsletter-phase4-substack-${{ github.run_id }}.json
+
   sync:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.phase4_dry_run != true }}
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'schedule' && 'prod' || github.event.inputs.environment }}
 
