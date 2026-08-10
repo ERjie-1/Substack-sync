@@ -11,9 +11,10 @@ import hashlib
 import html
 import json
 import re
+from email.utils import parseaddr
 from pathlib import Path
 
-from newsletter_registry import load_registry, resolve_source
+from newsletter_registry import load_registry
 
 
 SIDE_EFFECTS = {k: 0 for k in (
@@ -41,8 +42,10 @@ def _norm(value: str) -> str:
 
 
 def _normalized_sender(value: str) -> str:
-    match = re.search(r"<([^>]+)>", value or "")
-    return (match.group(1) if match else (value or "")).strip().lower()
+    _, address = parseaddr(value or "")
+    if not address or not re.fullmatch(r"[^\s@<>]+@[^\s@<>]+", address):
+        return ""
+    return address.strip().lower()
 
 
 def _header_map(headers):
@@ -55,7 +58,7 @@ def _query(subject: str, lookback_days: int) -> str:
     return f'subject:"{escaped}" newer_than:{int(lookback_days)}d'
 
 
-def _metadata_match(*, source_id, expected_subject, message_id, headers):
+def _metadata_match(*, source_id, declared_sender, expected_subject, message_id, headers):
     values = _header_map(headers)
     subject = html.unescape(values.get("subject", ""))
     sender = _normalized_sender(values.get("from", ""))
@@ -68,10 +71,15 @@ def _metadata_match(*, source_id, expected_subject, message_id, headers):
         terminal = "EXCLUDED"
     elif not required_present:
         terminal = "HELD_LINEAGE_MISSING"
+    elif sender != declared_sender:
+        terminal = "SENDER_MISMATCH"
     else:
-        terminal = "ADMITTED"
+        terminal = "SENDER_MATCH"
     return {
         "source_id": source_id,
+        "declared_sender": declared_sender,
+        "observed_sender": sender,
+        "sender_match": bool(sender and sender == declared_sender),
         "sender": sender,
         "subject_sha256": _sha256(subject),
         "date": date,
@@ -97,6 +105,8 @@ def run_header_probe(*, registry_path, service, run_manifest_id, manifest_sha,
 
     probes = []
     for source_id, subject in PROBES.items():
+        source = next(item for item in registry["sources"] if item["source_id"] == source_id)
+        declared_sender = source["senders"][0]
         query = _query(subject, lookback_days)
         listed = service.users().messages().list(
             userId="me", q=query, maxResults=max_results
@@ -110,14 +120,17 @@ def run_header_probe(*, registry_path, service, run_manifest_id, manifest_sha,
             ).execute()
             headers = metadata.get("payload", {}).get("headers", [])
             matches.append(_metadata_match(
-                source_id=source_id, expected_subject=subject,
+                source_id=source_id, declared_sender=declared_sender,
+                expected_subject=subject,
                 message_id=message_id, headers=headers
             ))
         exact = [m for m in matches if m["terminal_state"] != "EXCLUDED"]
         if len(exact) == 0:
-            terminal = "TRUE_NO_RECENT_MAIL"
-        elif len(exact) == 1 and exact[0]["terminal_state"] == "ADMITTED":
-            terminal = "ADMITTED"
+            terminal = "UNVERIFIED_NO_EXACT_SUBJECT_MATCH"
+        elif len(exact) == 1 and exact[0]["terminal_state"] == "SENDER_MATCH":
+            terminal = "SENDER_MATCH"
+        elif len(exact) == 1 and exact[0]["terminal_state"] == "SENDER_MISMATCH":
+            terminal = "SENDER_MISMATCH"
         elif len(exact) == 1:
             terminal = exact[0]["terminal_state"]
         else:
