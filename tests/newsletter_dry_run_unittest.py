@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 from unittest.mock import Mock
+from unittest.mock import patch
+import types, sys
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -31,4 +33,22 @@ class NewsletterDryRunTests(unittest.TestCase):
         spies={name: Mock() for name in ("notion", "ledger", "translation", "dispatch", "send")}
         out=run_dry_run([], mutator_spies=spies, **self.kw)
         for spy in spies.values(): spy.assert_not_called()
+    def test_real_gmail_collector_read_only_denylist(self):
+        google=types.ModuleType("google"); oauth2=types.ModuleType("google.oauth2"); creds=types.ModuleType("google.oauth2.credentials"); auth=types.ModuleType("google.auth"); transport=types.ModuleType("google.auth.transport"); req=types.ModuleType("google.auth.transport.requests"); api=types.ModuleType("googleapiclient"); discovery=types.ModuleType("googleapiclient.discovery")
+        creds.Credentials=type("Credentials",(),{}); req.Request=type("Request",(),{}); discovery.build=lambda *a,**k: object()
+        oauth2.credentials=creds; auth.transport=transport; transport.requests=req; api.discovery=discovery
+        with patch.dict(sys.modules,{"google":google,"google.oauth2":oauth2,"google.oauth2.credentials":creds,"google.auth":auth,"google.auth.transport":transport,"google.auth.transport.requests":req,"googleapiclient":api,"googleapiclient.discovery":discovery}):
+            import sync_substack
+            with patch.object(sync_substack, "get_gmail_service", return_value=object()), \
+             patch.object(sync_substack, "get_emails", return_value=[{"id":"g1","from":"citrini@substack.com","body_text":"<p>Body</p>","subject":"x"}]), \
+             patch.object(sync_substack, "write_message_ledger") as ledger, \
+             patch.object(sync_substack, "update_recent_empty_statuses") as status, \
+             patch.object(sync_substack, "translate_blocks_deepseek") as translation:
+                from newsletter_dry_run import collect_gmail_items
+                rows=collect_gmail_items(registry_path=REGISTRY,source_ids=["citrini","capitalflow","sleepy"],max_emails=3,lookback_days=1)
+        self.assertEqual(rows[0]["gmail_message_id"], "g1")
+        ledger.assert_not_called(); status.assert_not_called(); translation.assert_not_called()
+    def test_canonical_body_is_stable_for_html_and_plain(self):
+        from body_canonical import canonical_body
+        self.assertEqual(canonical_body("<p>A\u00a0B</p>\n<div>C</div>"), canonical_body("A B\nC"))
 if __name__ == "__main__": unittest.main()

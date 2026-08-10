@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse, hashlib, json
 from pathlib import Path
 from newsletter_registry import RegistryError, canonical_identity, load_registry, resolve_source
+from body_canonical import canonical_body
 
 SIDE_EFFECTS = {k: 0 for k in (
     "notion_page_create", "notion_block_update", "source_status_update",
@@ -46,7 +47,7 @@ def run_dry_run(items, *, registry_path, source_ids, run_manifest_id, manifest_s
         try:
             source = resolve_source(registry, source_id=item.get("source_id"), sender=item.get("sender"))
             identity = canonical_identity(source, item)
-            body = (item.get("body") or "").strip()
+            body = canonical_body(item.get("body") or "")
             candidate = {"item": item, "source": source, "identity": identity,
                          "body": body, "body_sha256": _body_sha(body)}
             groups.setdefault(identity, []).append(candidate)
