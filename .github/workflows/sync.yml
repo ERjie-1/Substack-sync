@@ -101,7 +101,7 @@ on:
       phase4_registry_sha:
         description: 'Byte-identical registry SHA256'
         required: false
-        default: '191556090b5112fb0c2a0b77c39ebd3507bd82e76dd70c20d033c111033561ff'
+        default: 'eb2f5e0f6d1f58232cd99dc96e4b9b6dcada2f7976f4f13df39caf84368fbe85'
       phase4_source_ids:
         description: 'Exact bounded source ids'
         required: false
