@@ -130,7 +130,7 @@ concurrency:
 
 jobs:
   phase4-dry-run:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.phase4_dry_run == true && inputs.phase4_header_probe != true }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.phase4_dry_run == true }}
     runs-on: ubuntu-latest
     # Phase 4 remains read-only; use the already validated prod environment
     # credential without enabling the production sync job below.
@@ -170,7 +170,7 @@ jobs:
           path: newsletter-phase4-substack-${{ github.run_id }}.json
 
   phase4-header-probe:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.phase4_header_probe == true && inputs.phase4_dry_run != true }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.phase4_header_probe == true }}
     runs-on: ubuntu-latest
     # Header-only coverage probe; uses the validated prod credential but has
     # no body/attachment or mutator path and cannot enable sync below.
