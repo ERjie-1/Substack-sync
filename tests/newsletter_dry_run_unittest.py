@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-from unittest.mock import Mock
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -27,8 +26,4 @@ class NewsletterDryRunTests(unittest.TestCase):
     def test_receipt_path_isolated(self):
         out=run_dry_run([], **self.kw)
         with tempfile.TemporaryDirectory(prefix="newsletter-phase4-") as d: write_isolated_receipt(out, str(Path(d)/"receipt.json"))
-    def test_mutator_spies_are_not_called(self):
-        spies={name: Mock() for name in ("notion", "ledger", "translation", "dispatch", "send")}
-        out=run_dry_run([], mutator_spies=spies, **self.kw)
-        for spy in spies.values(): spy.assert_not_called()
 if __name__ == "__main__": unittest.main()

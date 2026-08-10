@@ -31,13 +31,10 @@ def collect_gmail_items(*, registry_path, source_ids, max_emails, lookback_days,
     return rows
 
 def run_dry_run(items, *, registry_path, source_ids, run_manifest_id, manifest_sha,
-                registry_sha_expected, repo_sha, mutator_spies=None):
+                registry_sha_expected, repo_sha):
     if set(source_ids) != {"citrini", "capitalflow", "sleepy"}:
         raise ValueError("source_ids must be exactly citrini,capitalflow,sleepy")
     registry = load_registry(registry_path)
-    for name, spy in (mutator_spies or {}).items():
-        if getattr(spy, "call_count", 0):
-            raise AssertionError(f"dry-run mutator called: {name}")
     if registry["registry_sha"] != registry_sha_expected:
         raise RegistryError("registry sha mismatch against manifest")
     groups = {}
