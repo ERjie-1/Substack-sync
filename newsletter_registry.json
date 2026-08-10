@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-10T00:00:00Z",
+  "registry_sha": "798ca4b4a9abce56e15a3f6635a765edd667c94da4beda784612fe33ad7db676",
+  "sources": [
+    {
+      "source_id": "citrini",
+      "display_name": "Citrini",
+      "aliases": ["Citrini"],
+      "senders": ["citrini@substack.com"],
+      "onedrive_root": "newsletter/Citrini",
+      "prohibited_parent_roots": ["newsletter"],
+      "completeness_policy": "substantive_body_required",
+      "identity_policy": "gmail_message_id_plus_body_sha",
+      "episode_key": null,
+      "adapter_type": "substack",
+      "activation": "off",
+      "routes": {"daily": "include", "weekly": "exclude", "newsflow": "exclude", "archive": "include", "rag": "include"}
+    },
+    {
+      "source_id": "capitalflow",
+      "display_name": "Capitalflow",
+      "aliases": ["Capitalflow", "Capital Flows"],
+      "senders": ["capitalflows@substack.com"],
+      "onedrive_root": "newsletter/Capitalflow",
+      "prohibited_parent_roots": ["newsletter"],
+      "completeness_policy": "preview_or_empty_holds",
+      "identity_policy": "gmail_message_id_plus_body_sha",
+      "episode_key": null,
+      "adapter_type": "substack",
+      "activation": "off",
+      "routes": {"daily": "include", "weekly": "include", "newsflow": "pending", "archive": "include", "rag": "include"}
+    },
+    {
+      "source_id": "sleepy",
+      "display_name": "Sleepy",
+      "aliases": ["Sleepy", "SleepySol"],
+      "senders": ["sleepysol@substack.com"],
+      "onedrive_root": "newsletter/Sleepy",
+      "prohibited_parent_roots": ["newsletter"],
+      "completeness_policy": "substantive_body_required_optional_transcript",
+      "identity_policy": "gmail_message_id_plus_body_sha_episode_key",
+      "episode_key": "sleepy_episode",
+      "adapter_type": "substack",
+      "activation": "off",
+      "routes": {"daily": "include", "weekly": "exclude", "newsflow": "pending", "archive": "include", "rag": "include"}
+    }
+  ]
+}
