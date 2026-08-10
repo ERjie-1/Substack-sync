@@ -8,7 +8,7 @@ from newsletter_registry import load_registry, registry_sha
 
 ROOT = Path(__file__).parents[1]
 REGISTRY = ROOT / "newsletter_registry.json"
-REGISTRY_SHA = "191556090b5112fb0c2a0b77c39ebd3507bd82e76dd70c20d033c111033561ff"
+REGISTRY_SHA = "798ca4b4a9abce56e15a3f6635a765edd667c94da4beda784612fe33ad7db676"
 
 class NewsletterDryRunTests(unittest.TestCase):
     def setUp(self):
