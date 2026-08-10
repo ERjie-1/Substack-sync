@@ -139,11 +139,8 @@ jobs:
         run: pip install -r requirements.txt
       - name: Read bounded Gmail and emit isolated receipt
         env:
-          GMAIL_TOKEN_BASE64: ${{ secrets.GMAIL_TOKEN_BASE64 }}
+          GMAIL_TOKEN: ${{ secrets.GMAIL_TOKEN }}
         run: |
-          test -n "$GMAIL_TOKEN_BASE64"
-          export GMAIL_TOKEN="$(printf '%s' "$GMAIL_TOKEN_BASE64" | base64 --decode)"
-          test -n "$GMAIL_TOKEN"
           test -n "${{ inputs.phase4_manifest_id }}" && test -n "${{ inputs.phase4_manifest_sha }}"
           PYTHONPATH=. python newsletter_dry_run.py \
             --from-gmail \
