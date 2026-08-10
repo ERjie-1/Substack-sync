@@ -67,9 +67,9 @@ def run_dry_run(items, *, registry_path, source_ids, run_manifest_id, manifest_s
                          "route_consumption_count": 0})
     counts = {state: sum(1 for row in rows if row["terminal_state"] == state) for state in
               ("ADMITTED", "HELD_PREVIEW_OR_EMPTY", "HELD_UNKNOWN_SOURCE", "HELD_AMBIGUOUS_SOURCE", "HELD_LINEAGE_MISSING", "EXCLUDED", "DUPLICATE", "FAILED")}
-    return {"schema_version": "phase4-dry-run-3", "stage": "substack", "run_manifest_id": run_manifest_id,
+    return {"schema_version": "phase4-dry-run-2", "stage": "substack", "run_manifest_id": run_manifest_id,
             "manifest_sha": manifest_sha, "registry_sha": registry["registry_sha"],
-            "repo_sha": repo_sha, "physical_discovered": len(items), "logical_discovered": len({r.get("identity") for r in rows if r.get("identity")}), "duplicate_count": counts.get("DUPLICATE", 0), "discovered": len(items), "counts": counts,
+            "repo_sha": repo_sha, "discovered": len(items), "counts": counts,
             "extraction_count": sum(row["extraction_count"] for row in rows),
             "route_consumption_count": 0, "rows": rows, "side_effects": SIDE_EFFECTS.copy(),
             "no_send": True, "no_write": True}
