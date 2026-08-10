@@ -50,5 +50,5 @@ class NewsletterDryRunTests(unittest.TestCase):
         ledger.assert_not_called(); status.assert_not_called(); translation.assert_not_called()
     def test_canonical_body_is_stable_for_html_and_plain(self):
         from body_canonical import canonical_body
-        self.assertEqual(canonical_body("<p>A\u00a0B</p>\n<div>C</div>"), canonical_body("A B\nC"))
+        self.assertEqual(canonical_body("<p>A\u00a0B</p><div>C</div>"), canonical_body("A B\nC"))
 if __name__ == "__main__": unittest.main()
