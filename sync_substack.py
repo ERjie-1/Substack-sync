@@ -29,7 +29,7 @@ import quopri
 import hashlib
 import time
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional, Set, Tuple
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
@@ -1131,6 +1131,93 @@ def get_email_body(payload: Dict) -> Tuple[str, str]:
     return text_body, html_body
 
 
+def assess_gmail_coverage(emails: List[Dict], page_limit: int) -> Dict:
+    """Detect single-page risk; neither success nor unknown proves full coverage."""
+    now_ms = int(time.time() * 1000)
+    threshold_hours = 24
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    result = {
+        "mode": "single_page_risk_detection",
+        "checked_at_utc": datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(),
+        "threshold_hours": threshold_hours,
+        "first_page_count": len(emails),
+        "first_page_oldest_internal_date": None,
+        "first_page_oldest_age_hours": None,
+        "density_check_status": "ok",
+        "history_check_status": "unknown",
+        "history_authenticated": bool(token),
+        "history_http_status": None,
+        "previous_successful_natural_run_id": None,
+        "previous_successful_natural_run_started_at": None,
+        "hours_since_previous_successful_natural_run": None,
+        "risk_reasons": [],
+        "unknown_reasons": [],
+        "coverage_risk": None,
+    }
+    if emails:
+        try:
+            dates = [int(email["internal_date"]) for email in emails]
+            if any(value <= 0 or value > now_ms for value in dates):
+                raise ValueError("invalid internalDate")
+            oldest_ms = min(dates)
+            result["first_page_oldest_internal_date"] = datetime.fromtimestamp(
+                oldest_ms / 1000, timezone.utc
+            ).isoformat()
+            result["first_page_oldest_age_hours"] = (now_ms - oldest_ms) / 3600000
+            if len(emails) >= page_limit and now_ms - oldest_ms <= threshold_hours * 3600000:
+                result["risk_reasons"].append("dense_first_page")
+        except (KeyError, ValueError, TypeError, OverflowError, OSError):
+            result["density_check_status"] = "unknown"
+            result["unknown_reasons"].append("first_page_internal_date_unavailable")
+
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "Substack-coverage-check"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        response = requests.get(
+            "https://api.github.com/repos/ERjie-1/Substack-sync/actions/workflows/sync.yml/runs",
+            headers=headers,
+            params={"event": "schedule", "status": "success", "branch": "main", "per_page": 20},
+            timeout=10,
+        )
+        result["history_http_status"] = response.status_code
+        response.raise_for_status()
+        previous_runs = []
+        for run in response.json().get("workflow_runs", []):
+            if (run.get("event") != "schedule" or run.get("head_branch") != "main"
+                    or run.get("status") != "completed" or run.get("conclusion") != "success"
+                    or str(run.get("id")) == os.environ.get("GITHUB_RUN_ID")):
+                continue
+            started = run.get("run_started_at") or run.get("created_at")
+            stamp = datetime.fromisoformat(started.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                continue
+            stamp_ms = int(stamp.timestamp() * 1000)
+            if 0 < stamp_ms < now_ms:
+                previous_runs.append((stamp_ms, run, started))
+        if not previous_runs:
+            raise ValueError("no previous successful natural run")
+        previous_ms, previous, started = max(previous_runs, key=lambda entry: entry[0])
+        gap_hours = (now_ms - previous_ms) / 3600000
+        result.update({
+            "history_check_status": "ok",
+            "previous_successful_natural_run_id": previous["id"],
+            "previous_successful_natural_run_started_at": started,
+            "hours_since_previous_successful_natural_run": gap_hours,
+        })
+        if gap_hours > threshold_hours:
+            result["risk_reasons"].append("long_natural_run_gap")
+    except Exception as exc:
+        # Do not expose request headers/tokens, or change processing success
+        # into PARTIAL solely because GitHub metadata could not be read.
+        result["unknown_reasons"].append("history_unavailable")
+        result["history_error_type"] = type(exc).__name__
+    result["coverage_risk"] = (
+        True if result["risk_reasons"] else (None if result["unknown_reasons"] else False)
+    )
+    return result
+
+
 # ============ Notion API ============
 class NotionAPI:
     BASE_URL = "https://api.notion.com/v1"
@@ -1514,6 +1601,7 @@ def sync_gmail_to_notion():
         "message_results": [],
         "requested_message_ids": sorted(SYNC_MESSAGE_IDS),
         "sender_filter": SYNC_SENDER_EMAIL or None,
+        "coverage_check": {"mode": "not_evaluated", "coverage_risk": None},
     }
 
     def record_message_result(email: Dict, **fields):
@@ -1722,6 +1810,14 @@ def sync_gmail_to_notion():
     except Exception as e:
         print(f"Error fetching emails: {e}")
         fail_closed("gmail_fetch", e)
+
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule" and not SYNC_MESSAGE_IDS:
+        receipt["coverage_check"] = assess_gmail_coverage(emails, max_results)
+        print(f"[COVERAGE_CHECK] {json.dumps(receipt['coverage_check'], sort_keys=True)}")
+        if receipt["coverage_check"]["coverage_risk"] is True:
+            print("WARNING: Gmail coverage risk detected; manual assessment required")
+        elif receipt["coverage_check"]["unknown_reasons"]:
+            print("WARNING: Gmail coverage check unknown; not evidence of no risk")
 
     # 同步邮件
     synced_count = 0
@@ -2234,7 +2330,9 @@ def sync_gmail_to_notion():
 
     receipt.update({
         "run_finished_at": datetime.now().isoformat(),
-        "status": "FAIL" if receipt["failures"] else "PASS",
+        "status": "FAIL" if receipt["failures"] else (
+            "PARTIAL" if receipt["coverage_check"].get("coverage_risk") is True else "PASS"
+        ),
         "fetched_count": len(emails),
         "processed_count": processed_count,
         "synced_count": synced_count,
