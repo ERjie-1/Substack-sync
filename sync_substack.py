@@ -567,6 +567,37 @@ def _safe_deepseek_error(response) -> Dict:
     return diagnostics
 
 
+class TranslationResponse(str):
+    """String-compatible content with bounded provider completion metadata."""
+
+    def __new__(cls, content, finish_reason):
+        obj = super().__new__(cls, content)
+        allowed = {"stop", "length", "content_filter", "tool_calls", "function_call",
+                   "insufficient_system_resource"}
+        obj.finish_reason = finish_reason if isinstance(finish_reason, str) and finish_reason in allowed else "unknown"
+        return obj
+
+
+def _translation_label_diagnostics(response: str, translations: List[Optional[str]]) -> Dict:
+    # Use the same matcher as the parser. Counts describe parsed labels, not
+    # provider omissions; never retain response text or arbitrary label values.
+    count = len(translations)
+    seen = {}
+    for label, _ in re.findall(r'\[P(\d+)\]\s*(.+?)(?=\[P\d+\]|$)', response or "", re.DOTALL):
+        try:
+            index = int(label)
+        except ValueError:
+            continue
+        if 1 <= index <= count:
+            seen[index] = seen.get(index, 0) + 1
+    return {
+        "finish_reason": getattr(response, "finish_reason", "unknown"),
+        "missing_chunk_labels": [i + 1 for i, value in enumerate(translations) if value is None],
+        "duplicate_chunk_labels": sorted(i for i, n in seen.items() if n > 1),
+        "duplicate_label_occurrences": sum(n - 1 for n in seen.values()),
+    }
+
+
 def call_deepseek_api(texts: List[str], timeout: int = 60) -> Optional[str]:
     """调用 DeepSeek API"""
     if not DEEPSEEK_API_KEY:
@@ -601,7 +632,9 @@ def call_deepseek_api(texts: List[str], timeout: int = 60) -> Optional[str]:
             raise TranslationError("DeepSeek translation request failed", diagnostics)
 
         try:
-            return response.json()["choices"][0]["message"]["content"]
+            choice = response.json()["choices"][0]
+            content = choice["message"]["content"]
+            return TranslationResponse(content, choice.get("finish_reason")) if isinstance(content, str) else content
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             diagnostics["http_status"] = response.status_code
             diagnostics["response_body_sha256"] = hashlib.sha256(
@@ -704,6 +737,7 @@ def translate_blocks_deepseek(blocks: List[Dict]) -> List[Dict]:
                             (deepseek_response or "").encode("utf-8", errors="ignore")
                         ).hexdigest(),
                     }
+                    diagnostics.update(_translation_label_diagnostics(deepseek_response, batch_translations))
                     print(
                         "    DeepSeek incomplete translation: "
                         f"{json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)}"
